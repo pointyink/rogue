@@ -1,0 +1,13 @@
+{
+  "type": "ack_v0",
+  "group_ids": [
+    {
+      "replica_id": 513,
+      "sequence": 100992003
+    },
+    {
+      "replica_id": 2055,
+      "sequence": 202050057
+    }
+  ]
+}

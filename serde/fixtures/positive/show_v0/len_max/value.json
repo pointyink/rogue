@@ -1,0 +1,12 @@
+{
+  "type": "show_v0",
+  "id": {
+    "replica_id": 65535,
+    "sequence": 4294967295
+  },
+  "target": {
+    "replica_id": 65534,
+    "sequence": 4294967294
+  },
+  "len": 4294967295
+}

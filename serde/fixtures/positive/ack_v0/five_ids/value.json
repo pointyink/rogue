@@ -1,0 +1,25 @@
+{
+  "type": "ack_v0",
+  "group_ids": [
+    {
+      "replica_id": 1,
+      "sequence": 10
+    },
+    {
+      "replica_id": 1,
+      "sequence": 11
+    },
+    {
+      "replica_id": 2,
+      "sequence": 5
+    },
+    {
+      "replica_id": 7,
+      "sequence": 42
+    },
+    {
+      "replica_id": 9,
+      "sequence": 100
+    }
+  ]
+}

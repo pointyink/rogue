@@ -1,0 +1,12 @@
+{
+  "type": "hide_v0",
+  "id": {
+    "replica_id": 1,
+    "sequence": 10
+  },
+  "target": {
+    "replica_id": 1,
+    "sequence": 5
+  },
+  "len": 1
+}

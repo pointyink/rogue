@@ -1,0 +1,13 @@
+{
+  "type": "insert_v0",
+  "id": {
+    "replica_id": 1,
+    "sequence": 1
+  },
+  "parent": {
+    "replica_id": 0,
+    "sequence": 0
+  },
+  "side": "root",
+  "chars_hex": "4100"
+}

@@ -1,0 +1,10 @@
+[
+  { "name": "out_of_memory", "code": 1 },
+  { "name": "invalid_group", "code": 2 },
+  { "name": "out_of_bounds", "code": 3 },
+  { "name": "parse_error", "code": 4 },
+  { "name": "render_overflow", "code": 5 },
+  { "name": "unknown_parent", "code": 6 },
+  { "name": "unknown_target", "code": 7 },
+  { "name": "unknown_id", "code": 8 }
+]

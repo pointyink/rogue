@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "checkJs": true,
+    "strict": true,
+    "moduleResolution": "bundler",
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "skipLibCheck": true,
+    "maxNodeModuleJsDepth": 0,
+    "paths": {
+      "@pointyink/rogue": ["../../rogue/types/index.d.ts"],
+      "@pointyink/rogue/sync-client": ["../../rogue/types/sync-client.d.ts"]
+    }
+  },
+  "include": ["plugin.js", "scrub.js"],
+  "exclude": ["types"]
+}

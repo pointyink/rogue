@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "stripInternal": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "skipLibCheck": true,
+    "rootDir": ".",
+    "outDir": "types"
+  },
+  "include": [
+    "node_id_v0.js",
+    "insert_v0.js",
+    "hide_v0.js",
+    "show_v0.js",
+    "multi_op_v0.js",
+    "ack_v0.js",
+    "content_address_v0.js",
+    "json_envelope_v0.js"
+  ]
+}

@@ -1,0 +1,58 @@
+/**
+ * Parse `html` and re-serialize it through the rope's canonical form (the same
+ * scrub + escape the CRDT render uses). Reports whether it round-trips un-mangled
+ * and what it normalizes to.
+ * @param {string} html @param {Document} doc
+ * @returns {{ ok: boolean, cleaned: string }}
+ */
+export function roundTripHtml(html: string, doc: Document): {
+    ok: boolean;
+    cleaned: string;
+};
+/**
+ * Create a headless editor (a CRDT replica over a jsdom <div>).
+ *
+ * Pass `doc`/`win`/`element` to bind an existing jsdom (e.g. the MCP server owns
+ * the jsdom + sync client); otherwise a fresh jsdom is created.
+ *
+ * @param {{ replicaId?: number, onCommit?: (payload: Uint8Array) => void, doc?: Document, win?: Window, element?: HTMLElement }} [options]
+ * @returns {Promise<HeadlessEditor>}
+ */
+export function createHeadlessEditor({ replicaId, onCommit, doc, win, element }?: {
+    replicaId?: number;
+    onCommit?: (payload: Uint8Array) => void;
+    doc?: Document;
+    win?: Window;
+    element?: HTMLElement;
+}): Promise<HeadlessEditor>;
+export type HeadlessEditor = {
+    node: import("./sync.js").RogueNode;
+    element: HTMLElement;
+    getHtml: () => string;
+    getVisLen: () => number;
+    validate: (html: string) => {
+        ok: boolean;
+        cleaned: string;
+    };
+    setHtml: (html: string) => Promise<{
+        ok: boolean;
+        cleaned?: string;
+        html?: string;
+    }>;
+    appendHtml: (html: string) => Promise<{
+        ok: boolean;
+        cleaned?: string;
+        html?: string;
+    }>;
+    undo: () => void;
+    redo: () => void;
+    mergeOp: (payload: Uint8Array) => void;
+    markUserEdit: () => void;
+    subscribe: (cb: (payload: Uint8Array) => void) => () => boolean;
+    assertConsistent: () => {
+        ok: boolean;
+        crdt: string;
+        dom: string;
+    };
+    destroy: () => void;
+};

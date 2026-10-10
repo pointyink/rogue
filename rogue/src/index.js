@@ -1,0 +1,8 @@
+export { DomRope, buildRope } from './dom_rope.js'
+export { createRogueNode } from './sync.js'
+export { createComments } from './comments.js'
+export { createSuggestions } from './suggestions.js'
+export { createEditorSession } from './editor-session.js'
+export { RogueText } from './rogue_text.js'
+export { CrdtErrorKind, CrdtErrorNames, parseCrdtError } from './crdt_error.js'
+export { resolveReplicaId, syncBaseUrlFromWsUrl, persistedReplicaId } from './replica.js'

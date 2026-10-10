@@ -1,0 +1,8 @@
+{
+  "name": "rogue",
+  "private": true,
+  "workspaces": [
+    "serde",
+    "rogue"
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "type": "multi_op_v0",
+  "group_id": {
+    "replica_id": 4660,
+    "sequence": 3405691582
+  },
+  "ops": [
+    {
+      "disc": 1,
+      "payload_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "disc": 0,
+      "payload_hex": "deadbeef"
+    },
+    {
+      "disc": 2,
+      "payload_hex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "type": "multi_op_v0",
+  "group_id": {
+    "replica_id": 1,
+    "sequence": 100
+  },
+  "ops": [
+    {
+      "disc": 1,
+      "payload_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "type": "ack_v0",
+  "group_ids": [
+    {
+      "replica_id": 7,
+      "sequence": 42
+    }
+  ]
+}

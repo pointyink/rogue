@@ -1,0 +1,13 @@
+{
+  "type": "insert_v0",
+  "id": {
+    "replica_id": 513,
+    "sequence": 100992003
+  },
+  "parent": {
+    "replica_id": 2569,
+    "sequence": 235736075
+  },
+  "side": "right",
+  "chars_hex": "01020304"
+}

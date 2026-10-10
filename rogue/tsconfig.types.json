@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "stripInternal": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "skipLibCheck": true,
+    "rootDir": "src",
+    "outDir": "types"
+  },
+  "include": [
+    "src/sync.js",
+    "src/dom_rope.js",
+    "src/comments.js",
+    "src/editor-session.js",
+    "src/oplog.js",
+    "src/sync-client.js",
+    "src/doc-cache.js",
+    "src/doc-bus.js",
+    "src/checkpoint.js",
+    "src/replica.js",
+    "src/rogue_text.js",
+    "src/headless.js"
+  ],
+  "exclude": ["src/index.js", "src/rogue.wasm.js", "src/**/*.test.js", "src/test-helpers.js"]
+}

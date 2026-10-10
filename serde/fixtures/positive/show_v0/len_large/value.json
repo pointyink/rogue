@@ -1,0 +1,12 @@
+{
+  "type": "show_v0",
+  "id": {
+    "replica_id": 9,
+    "sequence": 1
+  },
+  "target": {
+    "replica_id": 9,
+    "sequence": 100
+  },
+  "len": 1000
+}

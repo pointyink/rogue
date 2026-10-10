@@ -1,0 +1,69 @@
+{
+  "name": "@pointyink/rogue",
+  "version": "0.2.2",
+  "description": "State-of-the-art HTML sync CRDT engine (Fugue CRDT + rope treap) with a DOM sync layer.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pointyink/rogue.git"
+  },
+  "type": "module",
+  "types": "./index.d.ts",
+  "files": [
+    "dist",
+    "index.d.ts",
+    "types"
+  ],
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./oplog": {
+      "types": "./types/oplog.d.ts",
+      "default": "./dist/oplog.js"
+    },
+    "./sync-client": {
+      "types": "./types/sync-client.d.ts",
+      "default": "./dist/sync-client.js"
+    },
+    "./doc-cache": {
+      "types": "./types/doc-cache.d.ts",
+      "default": "./dist/doc-cache.js"
+    },
+    "./doc-bus": {
+      "types": "./types/doc-bus.d.ts",
+      "default": "./dist/doc-bus.js"
+    },
+    "./text": {
+      "types": "./types/rogue_text.d.ts",
+      "default": "./dist/rogue_text.js"
+    },
+    "./headless": {
+      "types": "./types/headless.d.ts",
+      "default": "./dist/headless.js"
+    }
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build:wasm": "zig build wasm -Doptimize=ReleaseFast && node scripts/emit-wasm.mjs",
+    "build:types": "tsc -p tsconfig.types.json",
+    "build:dist": "rm -rf dist && esbuild src/index.js src/sync.js src/dom_rope.js src/comments.js src/suggestions.js src/editor-session.js src/crdt_error.js src/replica.js src/checkpoint.js src/rogue_text.js src/oplog.js src/sync-client.js src/doc-cache.js src/doc-bus.js src/headless.js src/rogue.wasm.js --minify --outdir=dist --format=esm --platform=neutral",
+    "prepublishOnly": "npm run build:dist"
+  },
+  "dependencies": {
+    "@pointyink/serde": "^0.2.2",
+    "diff-match-patch": "^1.0.5",
+    "dompurify": "^3.2.6"
+  },
+  "devDependencies": {
+    "@types/diff-match-patch": "^1.0.36",
+    "@types/node": "^26.0.1",
+    "esbuild": "^0.25.0",
+    "fake-indexeddb": "^6.0.0",
+    "jsdom": "^26.1.0",
+    "typescript": "^6.0.3",
+    "vitest": "^3.1.1"
+  }
+}

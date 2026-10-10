@@ -1,0 +1,12 @@
+{
+  "type": "hide_v0",
+  "id": {
+    "replica_id": 513,
+    "sequence": 100992003
+  },
+  "target": {
+    "replica_id": 2055,
+    "sequence": 202050057
+  },
+  "len": 269291023
+}
