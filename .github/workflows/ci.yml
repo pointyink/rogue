@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Zig CRDT tests + JS unit tests + cross-language serde conformance. Fast, so
+  # one job with the three toolchains.
+  unit:
+    name: Unit, conformance, type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      # Install Zig directly from ziglang.org, cached by version. Avoids
+      # setup-zig actions whose community-mirror fetch was 404/503-ing.
+      - name: Cache Zig
+        id: zig-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.zig
+          key: zig-0.15.2-x86_64-linux
+      - name: Download Zig 0.15.2
+        if: steps.zig-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.zig
+          curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz | tar -xJ -C ~/.zig
+      - name: Add Zig to PATH
+        run: echo "$HOME/.zig/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
+      - run: npm ci
+      - run: make test
+
+  # Publish the @pointyink/* packages via npm Trusted Publishing (OIDC) — no
+  # long-lived npm token to store. Gated on the unit job. Runs on v* tags only
+  # (npm versions are immutable). Bump `version` in all four package.json files
+  # (serde, rogue, plugins/tinymce, plugins/hugerte), then tag v<version> (the
+  # tag must match, checked below). Requires a Trusted Publisher on npmjs.com
+  # for each package (GitHub Actions: pointyink / rogue / ci.yml).
+  publish-npm:
+    name: Publish npm packages
+    needs: [unit]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC token for npm trusted publishing
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 24 bundles npm >= 11.5.1, which trusted publishing requires.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+
+      - name: Verify tag matches package versions
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          for pkg in serde rogue plugins/tinymce plugins/hugerte; do
+            V="$(node -p "require('./$pkg/package.json').version")"
+            if [ "$V" != "$TAG" ]; then
+              echo "$pkg version $V does not match tag v$TAG" >&2
+              exit 1
+            fi
+          done
+
+      # Dependency order: serde → rogue → tinymce → hugerte. The npm CLI
+      # exchanges the OIDC id-token for a short-lived publish credential
+      # automatically (no NODE_AUTH_TOKEN). --access public because scoped
+      # packages default private.
+      - name: Publish serde
+        run: cd serde && npm publish --access public
+
+      - name: Publish rogue
+        run: cd rogue && npm publish --access public
+
+      - name: Publish tinymce
+        run: cd plugins/tinymce && npm publish --access public
+
+      - name: Publish hugerte
+        run: cd plugins/hugerte && npm publish --access public
