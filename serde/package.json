@@ -1,6 +1,6 @@
 {
   "name": "@pointyink/serde",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Binary wire-format codecs for the Pointy sync protocol.",
   "license": "Apache-2.0",
   "repository": {

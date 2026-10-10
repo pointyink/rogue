@@ -1,6 +1,6 @@
 {
   "name": "@pointyink/tinymce",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Make TinyMCE collaborative — drop-in real-time/offline sync backed by the Pointy engine.",
   "license": "Apache-2.0",
   "repository": {
@@ -32,6 +32,6 @@
     "tinymce": ">=6.0.0"
   },
   "dependencies": {
-    "@pointyink/rogue": "^0.2.3"
+    "@pointyink/rogue": "^0.2.4"
   }
 }
