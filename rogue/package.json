@@ -1,6 +1,6 @@
 {
   "name": "@pointyink/rogue",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "State-of-the-art HTML sync CRDT engine (Fugue CRDT + rope treap) with a DOM sync layer.",
   "license": "Apache-2.0",
   "repository": {
@@ -53,7 +53,7 @@
     "prepublishOnly": "npm run build:dist"
   },
   "dependencies": {
-    "@pointyink/serde": "^0.2.2",
+    "@pointyink/serde": "^0.2.3",
     "diff-match-patch": "^1.0.5",
     "dompurify": "^3.2.6"
   },
