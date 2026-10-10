@@ -28,7 +28,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"rogue/serde"
+	"github.com/pointyink/rogue/serde"
 )
 
 const outRoot = "serde/fixtures"
