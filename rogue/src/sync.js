@@ -148,6 +148,7 @@ export function nodeSpan(rope, node) {
  *   endLoad: () => void,
  *   drainParked: () => void,
  *   setSyncDebug: (on: boolean) => void,
+ *   setAuthor: (author: number) => void,
  *   markUserEdit: () => void,
  *   reserve: (nodes: number) => void,
  *   crdt: import('./comments.js').CrdtSurface,
@@ -224,6 +225,7 @@ export async function createRogueNode({
     rogue_head,
     rogue_ca_len,
     rogue_set_debug_logging,
+    rogue_set_author,
     rogue_reserve,
   } = exp;
 
@@ -1851,6 +1853,15 @@ export async function createRogueNode({
      *  estimate is rough — the engine still grows on demand as a backstop. */
     reserve(/** @type {number} */ nodes) {
       if (nodes > 0) rogue_reserve(nodes);
+    },
+
+    /** Switch the stamping identity for subsequent local ops. Lets one node emit
+     *  ops under several replica ids — e.g. a shared server-side replica serving
+     *  many agent connections. Each author gets its own monotonic sequence,
+     *  seeded from the shared clock; ids must be unique per doc and unused by any
+     *  other writer. Throws on allocation failure. */
+    setAuthor(/** @type {number} */ author) {
+      if (!rogue_set_author(author)) throw new Error("rogue_set_author failed — out of memory");
     },
 
     undo,

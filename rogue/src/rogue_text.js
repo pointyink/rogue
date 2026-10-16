@@ -71,6 +71,16 @@ export class RogueText {
     this._length -= len;
   }
 
+  /**
+   * Switch the stamping identity for subsequent edits, so one doc can emit ops
+   * under several replica ids (each with its own counter). @param {number} id
+   */
+  setAuthor(id) {
+    if (!this._exp.rogue_set_author(id)) {
+      throw new Error('rogue_set_author failed — out of memory');
+    }
+  }
+
   /** Materialize the current visible text. */
   toString() {
     this._exp.rogue_render();

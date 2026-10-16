@@ -62,6 +62,12 @@ pub fn Rogue(comptime Char: type) type {
         replica_id: u16,
         sequence: u32,
 
+        /// Per-author next-sequence counters. `replica_id` is the *current*
+        /// author; `setAuthor` lets one node stamp ops under several replica ids
+        /// (a shared server-side replica multiplexing many agent connections),
+        /// each with its own monotonic counter seeded from the shared clock.
+        author_seq: std.AutoHashMapUnmanaged(u16, u32),
+
         /// Op treap pool (one node per op run).
         op_pool: []Oplog.Node,
         op_pool_len: u32,
@@ -100,6 +106,7 @@ pub fn Rogue(comptime Char: type) type {
                 .allocator = allocator,
                 .replica_id = replica_id,
                 .sequence = 1,
+                .author_seq = .empty,
                 .op_pool = try allocator.alloc(Oplog.Node, cap),
                 .op_pool_len = 1, // slot 0 is NULL sentinel
                 .op_root = NULL,
@@ -108,6 +115,8 @@ pub fn Rogue(comptime Char: type) type {
                 .group_order = .empty,
             };
             self.zeroSlot(0);
+            // The initial replica is the first registered author.
+            try self.author_seq.put(allocator, replica_id, 1);
             return self;
         }
 
@@ -126,6 +135,7 @@ pub fn Rogue(comptime Char: type) type {
             self.op_index.deinit();
             self.head.deinit(a);
             self.group_order.deinit(a);
+            self.author_seq.deinit(a);
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -138,7 +148,7 @@ pub fn Rogue(comptime Char: type) type {
             if (vis_ix > self.visLen()) return error.OutOfBounds;
             const parent, const side = self.parentForInsert(vis_ix);
             const id = self.nextId();
-            self.sequence += @as(u32, @intCast(chars.len)) - 1; // reserve slots for multi-char
+            self.reserveSeq(@as(u32, @intCast(chars.len)) - 1); // reserve slots for multi-char
             try out.append(self.allocator, .{ .insert = .{ .id = id, .parent = parent, .side = side, .chars = chars } });
         }
 
@@ -359,6 +369,10 @@ pub fn Rogue(comptime Char: type) type {
         /// Reset the document to empty, preserving cap/allocator/replica_id and the
         /// monotonic Lamport clock (`sequence`). Clears all applied-op bookkeeping so
         /// a caller can replay a fresh group sequence in any order.
+        ///
+        /// `author_seq` is deliberately left intact: rewinding an author's counter
+        /// would re-issue `(replica, seq)` ids that op-idempotency treats as
+        /// already-applied, silently dropping the replayed ops.
         pub fn resetDoc(self: *Self) void {
             self.rope_root = NULL;
             self.len = 1;
@@ -1187,9 +1201,38 @@ pub fn Rogue(comptime Char: type) type {
             if (incoming >= self.sequence) self.sequence = incoming + 1;
         }
 
+        /// Register `author` as a stamping identity and make it current. One node
+        /// can therefore emit ops under several replica ids — e.g. a shared
+        /// server-side replica serving many agent connections. A newly seen
+        /// author's counter is seeded from the shared clock so its first op sorts
+        /// after everything this replica has seen (NodeId compare is
+        /// sequence-first). Idempotent; never rewinds an existing counter.
+        pub fn setAuthor(self: *Self, author: u16) !void {
+            const gop = try self.author_seq.getOrPut(self.allocator, author);
+            if (!gop.found_existing) gop.value_ptr.* = self.sequence;
+            self.replica_id = author;
+        }
+
         fn nextId(self: *Self) NodeId {
-            defer self.sequence += 1;
-            return .{ .replica_id = self.replica_id, .sequence = self.sequence };
+            const author = self.replica_id;
+            var seq: u32 = self.sequence;
+            if (self.author_seq.getPtr(author)) |next| {
+                seq = @max(next.*, self.sequence);
+                next.* = seq + 1;
+            }
+            if (seq >= self.sequence) self.sequence = seq + 1;
+            return .{ .replica_id = author, .sequence = seq };
+        }
+
+        /// Reserve `extra` follow-on slots after the id just stamped for the
+        /// current author. A multi-char insert occupies consecutive sequences even
+        /// though only the first carries an explicit id on the wire.
+        fn reserveSeq(self: *Self, extra: u32) void {
+            if (extra == 0) return;
+            self.sequence += extra;
+            if (self.author_seq.getPtr(self.replica_id)) |next| {
+                if (next.* < self.sequence) next.* = self.sequence;
+            }
         }
     };
 }
@@ -1539,6 +1582,63 @@ test "visIx and totIx" {
     buf.clearRetainingCapacity();
     try std.testing.expectEqual(@as(u32, 1), r.visIx(id3).?); // C shifts to 1
     try std.testing.expectEqual(@as(u32, 1), r.totIx(id2).?); // B still at tot 1
+}
+
+test "multi-author replica: distinct replica ids per author, converging" {
+    var hub = try Rogue(u16).init(std.testing.allocator, 1, 256);
+    defer hub.deinit();
+    var peer = try Rogue(u16).init(std.testing.allocator, 9, 256);
+    defer peer.deinit();
+    var buf: std.ArrayListUnmanaged(@import("op.zig").WireOp(u16)) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    // Author 1 writes "ab".
+    try hub.insert(0, &.{ @as(u16, 'a'), @as(u16, 'b') }, &buf);
+    const op1 = buf.items[0].insert.id;
+    try std.testing.expectEqual(@as(u16, 1), op1.replica_id);
+    try hub.merge(hub.multiOp(buf.items));
+    buf.clearRetainingCapacity();
+
+    // Switch to author 2 (a second agent connection) and write "cd".
+    try hub.setAuthor(2);
+    try hub.insert(2, &.{ @as(u16, 'c'), @as(u16, 'd') }, &buf);
+    const op2 = buf.items[0].insert.id;
+    try std.testing.expectEqual(@as(u16, 2), op2.replica_id);
+    // Seeded from the shared clock, so author 2's first seq is past author 1's.
+    try std.testing.expect(op2.sequence == 3);
+    try hub.merge(hub.multiOp(buf.items));
+    buf.clearRetainingCapacity();
+
+    // Ids are unique across authors (no collision).
+    try std.testing.expect(!op1.eql(op2));
+
+    // Switching back to author 1 keeps its counter monotonic (no reuse).
+    try hub.setAuthor(1);
+    try hub.insert(4, &.{@as(u16, 'e')}, &buf);
+    const op3 = buf.items[0].insert.id;
+    try std.testing.expectEqual(@as(u16, 1), op3.replica_id);
+    try std.testing.expect(op3.sequence > op1.sequence);
+    try std.testing.expect(!op3.eql(op1) and !op3.eql(op2));
+    try hub.merge(hub.multiOp(buf.items));
+    buf.clearRetainingCapacity();
+
+    // A peer converging over the wire renders every author's chars in order.
+    // Each author's ops ride their own batch — a MultiOp is single-author
+    // (merge rejects an op whose replica id differs from the group id), which
+    // the engine satisfies naturally because each edit is one author's batch.
+    try hub.getOp(op1, &buf);
+    try peer.merge(peer.multiOp(buf.items));
+    buf.clearRetainingCapacity();
+    try hub.getOp(op2, &buf);
+    try peer.merge(peer.multiOp(buf.items));
+    buf.clearRetainingCapacity();
+    try hub.getOp(op3, &buf);
+    try peer.merge(peer.multiOp(buf.items));
+    buf.clearRetainingCapacity();
+    var out: std.ArrayListUnmanaged(u16) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try peer.render(null, null, &out);
+    try std.testing.expectEqualSlices(u16, &.{ 'a', 'b', 'c', 'd', 'e' }, out.items);
 }
 
 test "merge idempotent" {

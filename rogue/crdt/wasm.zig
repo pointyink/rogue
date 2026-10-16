@@ -151,6 +151,14 @@ export fn rogue_set_debug_logging(on: i32) void {
     debug_logging = on != 0;
 }
 
+/// Register (and switch to) an author identity for subsequent local ops, so one
+/// replica can stamp ops under several replica ids — a shared server-side
+/// replica multiplexing many agent connections. Returns 1 on success, 0 on OOM.
+export fn rogue_set_author(author: u16) i32 {
+    doc.setAuthor(author) catch return 0;
+    return 1;
+}
+
 export fn rogue_begin_batch() void {
     batch_mode = true;
     op_buf.clearRetainingCapacity();
