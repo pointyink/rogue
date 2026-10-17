@@ -42,13 +42,30 @@ jobs:
       - name: Add Zig to PATH
         run: echo "$HOME/.zig/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
       - run: npm ci
-      # The committed `types/` declarations are what consumers see. Regenerate
-      # them from source and fail if they weren't updated alongside the code —
-      # a release must never ship stale or missing declarations.
+      # The committed `types/` declarations and fixtures are what consumers
+      # and every language decode against. Regenerate from source and fail if
+      # they weren't updated alongside the code.
       - name: Verify committed type declarations are current
+        run: make types-check
+
+      - name: Verify generated fixtures are current
         run: |
-          cd rogue && npm run build:types
-          git -C .. diff --exit-code -- rogue/types
+          go run ./serde/fixtures/gen
+          git diff --exit-code -- serde/fixtures
+
+      # The JS layer loads a committed base64 copy of the Zig-built wasm.
+      # Rebuild it so a Zig change can't ship with a stale JS engine.
+      - name: Verify committed WASM is current
+        run: make wasm-check
+
+      # Catch JS type errors, formatting drift, and broken esbuild entrypoints
+      # before they reach a release.
+      - name: Typecheck, format, build smoke
+        run: |
+          make typecheck
+          make fmt-check
+          make build-dist
+
       - run: make test
 
   # Publish the @pointyink/* packages via npm Trusted Publishing (OIDC) — no

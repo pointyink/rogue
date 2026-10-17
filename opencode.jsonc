@@ -1,0 +1,67 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // Implement with the fast model; plan and review use the stronger one.
+  "model": "deepseek/deepseek-flash",
+  "default_agent": "build",
+
+  // Keep parallel task worktrees outside the checkout.
+  "worktree": {
+    "directory": "../rogue-worktrees",
+  },
+
+  "permissions": [
+    // Outside the project, ask first.
+    { "action": "external_directory", "resource": "*", "effect": "ask" },
+
+    // Secrets stay unreadable.
+    { "action": "read", "resource": "*.env", "effect": "deny" },
+    { "action": "read", "resource": "*.env.*", "effect": "deny" },
+    { "action": "read", "resource": "*.env.example", "effect": "allow" },
+
+    // Shell defaults to asking; the repo's verify loop is pre-approved.
+    { "action": "shell", "resource": "*", "effect": "ask" },
+    { "action": "shell", "resource": "make *", "effect": "allow" },
+    { "action": "shell", "resource": "npm run *", "effect": "allow" },
+    { "action": "shell", "resource": "npx tsc *", "effect": "allow" },
+    { "action": "shell", "resource": "npx vitest *", "effect": "allow" },
+    { "action": "shell", "resource": "zig build test*", "effect": "allow" },
+    { "action": "shell", "resource": "go test *", "effect": "allow" },
+    { "action": "shell", "resource": "node serde/fixtures_test.js", "effect": "allow" },
+    { "action": "shell", "resource": "cd rogue", "effect": "allow" },
+    { "action": "shell", "resource": "cd serde", "effect": "allow" },
+    { "action": "shell", "resource": "cd plugins/*", "effect": "allow" },
+
+    // Read-only git.
+    { "action": "shell", "resource": "git status*", "effect": "allow" },
+    { "action": "shell", "resource": "git diff*", "effect": "allow" },
+    { "action": "shell", "resource": "git log*", "effect": "allow" },
+    { "action": "shell", "resource": "git show*", "effect": "allow" },
+    { "action": "shell", "resource": "git merge-base*", "effect": "allow" },
+    { "action": "shell", "resource": "git rev-parse*", "effect": "allow" },
+    { "action": "shell", "resource": "git worktree list*", "effect": "allow" },
+    { "action": "shell", "resource": "git worktree add*", "effect": "allow" },
+
+    // Irreversible or release-affecting: always blocked.
+    { "action": "shell", "resource": "git push*", "effect": "deny" },
+    { "action": "shell", "resource": "git reset --hard*", "effect": "deny" },
+    { "action": "shell", "resource": "git reset --merge*", "effect": "deny" },
+    { "action": "shell", "resource": "git reset --keep*", "effect": "deny" },
+    { "action": "shell", "resource": "git clean*", "effect": "deny" },
+    { "action": "shell", "resource": "git restore*", "effect": "deny" },
+    { "action": "shell", "resource": "git checkout .", "effect": "deny" },
+    { "action": "shell", "resource": "git checkout -- *", "effect": "deny" },
+    { "action": "shell", "resource": "npm publish*", "effect": "deny" },
+    { "action": "shell", "resource": "rm -rf *", "effect": "deny" },
+    { "action": "shell", "resource": "rm -fr *", "effect": "deny" },
+    { "action": "shell", "resource": "sudo *", "effect": "deny" },
+  ],
+
+  "agents": {
+    // Keep the built-in plan permissions (read-only, plan files only) but use
+    // the stronger model.
+    "plan": {
+      "model": "deepseek/deepseek-v4-pro",
+    },
+  },
+}
