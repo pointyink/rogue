@@ -28,6 +28,11 @@ export class RogueText {
     insert(idx: number, str: string): void;
     /** Tombstone `len` code units starting at visible index `idx`. @param {number} idx @param {number} len */
     delete(idx: number, len: number): void;
+    /**
+     * Switch the stamping identity for subsequent edits, so one doc can emit ops
+     * under several replica ids (each with its own counter). @param {number} id
+     */
+    setAuthor(id: number): void;
     /** Materialize the current visible text. */
     toString(): string;
 }

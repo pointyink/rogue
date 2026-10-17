@@ -42,6 +42,13 @@ jobs:
       - name: Add Zig to PATH
         run: echo "$HOME/.zig/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
       - run: npm ci
+      # The committed `types/` declarations are what consumers see. Regenerate
+      # them from source and fail if they weren't updated alongside the code —
+      # a release must never ship stale or missing declarations.
+      - name: Verify committed type declarations are current
+        run: |
+          cd rogue && npm run build:types
+          git -C .. diff --exit-code -- rogue/types
       - run: make test
 
   # Publish the @pointyink/* packages via npm Trusted Publishing (OIDC) — no

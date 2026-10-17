@@ -1,6 +1,6 @@
 {
   "name": "@pointyink/rogue",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "State-of-the-art HTML sync CRDT engine (Fugue CRDT + rope treap) with a DOM sync layer.",
   "license": "Apache-2.0",
   "repository": {
@@ -50,15 +50,16 @@
     "build:wasm": "zig build wasm -Doptimize=ReleaseFast && node scripts/emit-wasm.mjs",
     "build:types": "tsc -p tsconfig.types.json",
     "build:dist": "rm -rf dist && esbuild src/index.js src/sync.js src/dom_rope.js src/comments.js src/suggestions.js src/editor-session.js src/crdt_error.js src/replica.js src/checkpoint.js src/rogue_text.js src/oplog.js src/sync-client.js src/doc-cache.js src/doc-bus.js src/headless.js src/rogue.wasm.js --minify --outdir=dist --format=esm --platform=neutral",
-    "prepublishOnly": "npm run build:dist"
+    "prepublishOnly": "npm run build:dist && npm run build:types"
   },
   "dependencies": {
-    "@pointyink/serde": "^0.2.5",
+    "@pointyink/serde": "^0.2.6",
     "diff-match-patch": "^1.0.5",
     "dompurify": "^3.2.6"
   },
   "devDependencies": {
     "@types/diff-match-patch": "^1.0.36",
+    "@types/jsdom": "^27.0.0",
     "@types/node": "^26.0.1",
     "esbuild": "^0.25.0",
     "fake-indexeddb": "^6.0.0",

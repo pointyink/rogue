@@ -97,6 +97,7 @@ export function nodeSpan(rope: NonNullable<ReturnType<typeof buildRope>>, node: 
  *   endLoad: () => void,
  *   drainParked: () => void,
  *   setSyncDebug: (on: boolean) => void,
+ *   setAuthor: (author: number) => void,
  *   markUserEdit: () => void,
  *   reserve: (nodes: number) => void,
  *   crdt: import('./comments.js').CrdtSurface,
@@ -212,6 +213,7 @@ export type RogueNode = {
     endLoad: () => void;
     drainParked: () => void;
     setSyncDebug: (on: boolean) => void;
+    setAuthor: (author: number) => void;
     markUserEdit: () => void;
     reserve: (nodes: number) => void;
     crdt: import("./comments.js").CrdtSurface;
