@@ -42,6 +42,9 @@ pub fn build(b: *std.Build) void {
     });
     wasm.entry = .disabled;
     wasm.rdynamic = true;
+    // Strip debug info: the published wasm doesn't need it, and the DWARF
+    // source paths make the artifact host/path-dependent (breaking wasm-check).
+    wasm.root_module.strip = true;
 
     // Byte-native module for the Go file-sync binding (insert_bytes_v0).
     const wasm_u8_root = b.createModule(.{
@@ -56,6 +59,7 @@ pub fn build(b: *std.Build) void {
     });
     wasm_u8.entry = .disabled;
     wasm_u8.rdynamic = true;
+    wasm_u8.root_module.strip = true;
 
     const install_u16 = b.addInstallArtifact(wasm, .{});
     const install_u8 = b.addInstallArtifact(wasm_u8, .{});
