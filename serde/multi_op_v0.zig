@@ -118,8 +118,8 @@ pub fn decode(
             if (off + size > buf.len) return error.Truncated;
             ops[i] = .{ .disc = disc, .payload = buf[off .. off + size] };
             off += size;
-        } else if (disc == 0) {
-            // insert_v0 — variable, length-prefixed
+        } else if (disc == 0 or disc == 6) {
+            // insert_v0 / insert_bytes_v0 — variable, length-prefixed
             if (off + 4 > buf.len) return error.Truncated;
             const len = std.mem.readInt(u32, buf[off .. off + 4][0..4], .little);
             off += 4;

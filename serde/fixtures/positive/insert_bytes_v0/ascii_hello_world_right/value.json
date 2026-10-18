@@ -1,0 +1,13 @@
+{
+  "type": "insert_bytes_v0",
+  "id": {
+    "replica_id": 2,
+    "sequence": 50
+  },
+  "parent": {
+    "replica_id": 2,
+    "sequence": 49
+  },
+  "side": "right",
+  "bytes_hex": "48656c6c6f2c20776f726c6421"
+}

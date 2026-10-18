@@ -57,6 +57,14 @@ type fxInsert struct {
 	CharsHex string        `json:"chars_hex"`
 }
 
+type fxInsertBytes struct {
+	Type     string        `json:"type"`
+	Id       fxNodeIdEmbed `json:"id"`
+	Parent   fxNodeIdEmbed `json:"parent"`
+	Side     string        `json:"side"`
+	BytesHex string        `json:"bytes_hex"`
+}
+
 type fxHideShow struct {
 	Type   string        `json:"type"`
 	Id     fxNodeIdEmbed `json:"id"`
@@ -149,6 +157,54 @@ func TestPositiveFixtures(t *testing.T) {
 				NodeIdV0{ReplicaId: v.Id.ReplicaId, Sequence: v.Id.Sequence},
 				NodeIdV0{ReplicaId: v.Parent.ReplicaId, Sequence: v.Parent.Sequence},
 				side, chars, enc,
+			)
+			if !bytes.Equal(enc, b) {
+				t.Fatalf("encode mismatch:\n got: %x\nwant: %x", enc, b)
+			}
+		})
+	})
+
+	t.Run("insert_bytes_v0", func(t *testing.T) {
+		walkPositive(t, "insert_bytes_v0", func(t *testing.T, b []byte, raw []byte) {
+			var v fxInsertBytes
+			if err := json.Unmarshal(raw, &v); err != nil {
+				t.Fatalf("parse value.json: %v", err)
+			}
+
+			// decode → must match value.json
+			got, err := InsertBytesV0Decode(b)
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got.Id.ReplicaId != v.Id.ReplicaId || got.Id.Sequence != v.Id.Sequence {
+				t.Fatalf("id mismatch: got {%d,%d}, want {%d,%d}",
+					got.Id.ReplicaId, got.Id.Sequence, v.Id.ReplicaId, v.Id.Sequence)
+			}
+			if got.Parent.ReplicaId != v.Parent.ReplicaId || got.Parent.Sequence != v.Parent.Sequence {
+				t.Fatalf("parent mismatch: got {%d,%d}, want {%d,%d}",
+					got.Parent.ReplicaId, got.Parent.Sequence, v.Parent.ReplicaId, v.Parent.Sequence)
+			}
+			if got.Side.String() != v.Side {
+				t.Fatalf("side mismatch: got %q, want %q", got.Side.String(), v.Side)
+			}
+			wantBytes, err := hex.DecodeString(v.BytesHex)
+			if err != nil {
+				t.Fatalf("bytes_hex: %v", err)
+			}
+			if !bytes.Equal(got.Bytes, wantBytes) {
+				t.Fatalf("bytes mismatch:\n got: %x\nwant: %x", got.Bytes, wantBytes)
+			}
+
+			// encode → must match bytes.bin
+			side, err := InsertV0SideFromString(v.Side)
+			if err != nil {
+				t.Fatalf("side parse: %v", err)
+			}
+			enc := make([]byte, InsertBytesV0EncodedSize(len(wantBytes)))
+			InsertBytesV0Encode(
+				NodeIdV0{ReplicaId: v.Id.ReplicaId, Sequence: v.Id.Sequence},
+				NodeIdV0{ReplicaId: v.Parent.ReplicaId, Sequence: v.Parent.Sequence},
+				side, wantBytes, enc,
 			)
 			if !bytes.Equal(enc, b) {
 				t.Fatalf("encode mismatch:\n got: %x\nwant: %x", enc, b)
@@ -351,6 +407,19 @@ func TestNegativeFixtures(t *testing.T) {
 		})
 	})
 
+	t.Run("insert_bytes_v0", func(t *testing.T) {
+		walkNegative(t, "insert_bytes_v0", func(t *testing.T, b []byte, kind string) {
+			_, err := InsertBytesV0Decode(b)
+			if err == nil {
+				t.Fatalf("expected error of kind %q, got nil (bytes: %x)", kind, b)
+			}
+			got := classifyInsertBytesV0Err(err)
+			if got != kind {
+				t.Fatalf("error kind mismatch: got %q (%v), want %q", got, err, kind)
+			}
+		})
+	})
+
 	t.Run("hide_v0", func(t *testing.T) {
 		walkNegative(t, "hide_v0", func(t *testing.T, b []byte, kind string) {
 			_, err := HideV0Decode(b)
@@ -393,6 +462,16 @@ func classifyInsertV0Err(err error) string {
 		return "invalid_side"
 	}
 	if errors.Is(err, ErrInsertV0Truncated) {
+		return "truncated"
+	}
+	return fmt.Sprintf("unexpected:%v", err)
+}
+
+func classifyInsertBytesV0Err(err error) string {
+	if errors.Is(err, ErrInsertBytesV0InvalidSide) {
+		return "invalid_side"
+	}
+	if errors.Is(err, ErrInsertBytesV0Truncated) {
 		return "truncated"
 	}
 	return fmt.Sprintf("unexpected:%v", err)

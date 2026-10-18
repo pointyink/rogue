@@ -145,10 +145,13 @@ pub fn Rogue(comptime Char: type) type {
         /// Stamp an insert id and append to out. No document mutation.
         /// chars must remain valid until merge is called.
         pub fn insert(self: *Self, vis_ix: u32, chars: []const Char, out: *std.ArrayListUnmanaged(WireOpT)) !void {
+            // Empty inserts are a no-op. Besides being meaningless, `chars.len - 1`
+            // would underflow below and wrap the Lamport clock.
+            if (chars.len == 0) return;
             if (vis_ix > self.visLen()) return error.OutOfBounds;
             const parent, const side = self.parentForInsert(vis_ix);
             const id = self.nextId();
-            self.reserveSeq(@as(u32, @intCast(chars.len)) - 1); // reserve slots for multi-char
+            self.reserveSeq(@intCast(chars.len - 1)); // reserve slots for multi-char
             try out.append(self.allocator, .{ .insert = .{ .id = id, .parent = parent, .side = side, .chars = chars } });
         }
 
@@ -1492,6 +1495,25 @@ test "insert and render" {
     defer out.deinit(std.testing.allocator);
     try r.render(null, null, &out);
     try std.testing.expectEqualSlices(u16, &[_]u16{ 'h', 'e', 'l', 'l', 'o' }, out.items);
+}
+
+test "empty insert is a no-op" {
+    var r = try Rogue(u16).init(std.testing.allocator, 1, 64);
+    defer r.deinit();
+    var buf: std.ArrayListUnmanaged(@import("op.zig").WireOp(u16)) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try r.insert(0, &[_]u16{}, &buf);
+    try std.testing.expectEqual(@as(usize, 0), buf.items.len);
+
+    // The Lamport clock must not have wrapped: a following insert still works.
+    try r.insert(0, &[_]u16{'a'}, &buf);
+    try r.merge(r.multiOp(buf.items));
+
+    var out: std.ArrayListUnmanaged(u16) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try r.render(null, null, &out);
+    try std.testing.expectEqualSlices(u16, &[_]u16{'a'}, out.items);
 }
 
 test "grows past initial capacity" {

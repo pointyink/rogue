@@ -127,8 +127,8 @@ export function decode(buf) {
       if (off + fixed > buf.byteLength) throw new Error('multi_op_v0: truncated fixed op payload')
       ops[i] = { disc, payload: buf.subarray(off, off + fixed) }
       off += fixed
-    } else if (disc === 0) {
-      // insert_v0 — variable, length-prefixed
+    } else if (disc === 0 || disc === 6) {
+      // insert_v0 / insert_bytes_v0 — variable, length-prefixed
       if (off + 4 > buf.byteLength) throw new Error('multi_op_v0: truncated at op len')
       const len = view.getUint32(off, true)
       off += 4

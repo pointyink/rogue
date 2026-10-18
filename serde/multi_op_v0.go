@@ -121,8 +121,8 @@ func MultiOpV0Decode(buf []byte) (MultiOpV0, error) {
 			}
 			ops[i] = MultiOpV0InnerOp{Disc: disc, Payload: buf[off : off+int(size)]}
 			off += int(size)
-		} else if disc == 0 {
-			// insert_v0 — variable, length-prefixed
+		} else if disc == 0 || disc == 6 {
+			// insert_v0 / insert_bytes_v0 — variable, length-prefixed
 			if off+4 > len(buf) {
 				return MultiOpV0{}, ErrMultiOpV0Truncated
 			}

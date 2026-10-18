@@ -1,6 +1,6 @@
 {
   "name": "@pointyink/serde",
-  "version": "0.2.6",
+  "version": "0.3.0",
   "description": "Binary wire-format codecs for the Pointy sync protocol.",
   "license": "Apache-2.0",
   "repository": {
@@ -20,7 +20,7 @@
   },
   "scripts": {
     "build:types": "rm -rf types && tsc -p tsconfig.types.json",
-    "build:dist": "rm -rf dist && esbuild node_id_v0.js insert_v0.js hide_v0.js show_v0.js multi_op_v0.js ack_v0.js content_address_v0.js json_envelope_v0.js --minify --outdir=dist --format=esm --platform=neutral",
+    "build:dist": "rm -rf dist && esbuild node_id_v0.js insert_v0.js insert_bytes_v0.js hide_v0.js show_v0.js multi_op_v0.js ack_v0.js content_address_v0.js json_envelope_v0.js --minify --outdir=dist --format=esm --platform=neutral",
     "prepublishOnly": "npm run build:dist"
   }
 }

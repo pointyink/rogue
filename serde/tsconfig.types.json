@@ -15,6 +15,7 @@
   "include": [
     "node_id_v0.js",
     "insert_v0.js",
+    "insert_bytes_v0.js",
     "hide_v0.js",
     "show_v0.js",
     "multi_op_v0.js",

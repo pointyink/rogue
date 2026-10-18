@@ -17,6 +17,7 @@ import { createRogueNode } from './sync.js'
 import { assertConsistent } from './fuzz-helpers.js'
 import * as multiOpV0 from '@pointyink/serde/multi_op_v0'
 import * as insertV0 from '@pointyink/serde/insert_v0'
+import * as insertBytesV0 from '@pointyink/serde/insert_bytes_v0'
 import * as hideV0 from '@pointyink/serde/hide_v0'
 
 /** @returns {HTMLElement} */
@@ -111,6 +112,42 @@ describe('malformed / conflicting remote ops', () => {
     expect(el.innerHTML).toBe('<p>hello world</p>')
     expect(rogue.render()).toBe('<p>hello world</p>')
     assertConsistent('block-in-p rejected', el, rogue)
+  })
+
+  it('rejects a byte insert (disc 6) in an HTML doc', async () => {
+    const el = makeEditor()
+    /** @type {any} */
+    let caught = null
+    const node = await createRogueNode({
+      element: el,
+      replicaId: 1,
+      onError: (e) => {
+        caught = e
+      },
+    })
+    await type(el, '<p>hello</p>')
+    const rogue = /** @type {any} */ (window).rogue
+    const id = freshId()
+
+    // insert_bytes_v0 is the byte-native op; the u16 engine must reject it.
+    const payload = multiOp(id, [
+      {
+        disc: insertBytesV0.DISC,
+        payload: insertBytesV0.encode(
+          id,
+          { replica_id: 0, sequence: 0 },
+          insertBytesV0.Side.Root,
+          new Uint8Array([0xde, 0xad]),
+        ),
+      },
+    ])
+    node.mergeOp(payload)
+    await flush()
+
+    expect(caught).toBeTruthy()
+    expect(el.innerHTML).toBe('<p>hello</p>')
+    expect(rogue.render()).toBe('<p>hello</p>')
+    assertConsistent('byte op rejected', el, rogue)
   })
 
   it('rejects a stray </p> that unbalances a block', async () => {

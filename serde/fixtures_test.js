@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path'
 import * as nodeIdV0 from './node_id_v0.js'
 import * as multiOpV0 from './multi_op_v0.js'
 import * as insertV0 from './insert_v0.js'
+import * as insertBytesV0 from './insert_bytes_v0.js'
 import * as hideV0 from './hide_v0.js'
 import * as showV0 from './show_v0.js'
 import * as ackV0 from './ack_v0.js'
@@ -134,6 +135,39 @@ function runPositiveInsertV0() {
         chars[i] = wantCharBytes[2 * i] | (wantCharBytes[2 * i + 1] << 8)
       }
       const enc = insertV0.encode(value.id, value.parent, insertV0.sideFromString(value.side), chars)
+      if (!bytesEqual(enc, bytes)) {
+        throw new Error(`encode mismatch:\n  got:  ${toHex(enc)}\n  want: ${toHex(bytes)}`)
+      }
+    })
+  }
+}
+
+// ---- positive: insert_bytes_v0 ----
+
+function runPositiveInsertBytesV0() {
+  const dir = join(fixturesRoot, 'positive', 'insert_bytes_v0')
+  for (const name of listSubdirs(dir)) {
+    check(`positive/insert_bytes_v0/${name}`, () => {
+      const caseDir = join(dir, name)
+      const bytes = new Uint8Array(readFileSync(join(caseDir, 'bytes.bin')))
+      const value = JSON.parse(readFileSync(join(caseDir, 'value.json'), 'utf8'))
+
+      const got = insertBytesV0.decode(bytes)
+      if (got.id.replica_id !== value.id.replica_id || got.id.sequence !== value.id.sequence) {
+        throw new Error(`id: got {${got.id.replica_id},${got.id.sequence}}, want {${value.id.replica_id},${value.id.sequence}}`)
+      }
+      if (got.parent.replica_id !== value.parent.replica_id || got.parent.sequence !== value.parent.sequence) {
+        throw new Error(`parent: got {${got.parent.replica_id},${got.parent.sequence}}, want {${value.parent.replica_id},${value.parent.sequence}}`)
+      }
+      if (insertBytesV0.sideToString(got.side) !== value.side) {
+        throw new Error(`side: got ${insertBytesV0.sideToString(got.side)}, want ${value.side}`)
+      }
+      const wantBytes = fromHex(value.bytes_hex)
+      if (!bytesEqual(got.bytes, wantBytes)) {
+        throw new Error(`bytes:\n  got:  ${toHex(got.bytes)}\n  want: ${toHex(wantBytes)}`)
+      }
+
+      const enc = insertBytesV0.encode(value.id, value.parent, insertBytesV0.sideFromString(value.side), wantBytes)
       if (!bytesEqual(enc, bytes)) {
         throw new Error(`encode mismatch:\n  got:  ${toHex(enc)}\n  want: ${toHex(bytes)}`)
       }
@@ -334,6 +368,42 @@ function classifyInsertErr(err) {
   return `unexpected:${m}`
 }
 
+// ---- negative: insert_bytes_v0 ----
+
+function runNegativeInsertBytesV0() {
+  const dir = join(fixturesRoot, 'negative', 'insert_bytes_v0')
+  for (const name of listSubdirs(dir)) {
+    check(`negative/insert_bytes_v0/${name}`, () => {
+      const caseDir = join(dir, name)
+      const bytes = new Uint8Array(readFileSync(join(caseDir, 'bytes.bin')))
+      const expectedKind = readFileSync(join(caseDir, 'error.txt'), 'utf8').trim()
+
+      let threw = /** @type {Error | null} */ (null)
+      try {
+        insertBytesV0.decode(bytes)
+      } catch (err) {
+        threw = err instanceof Error ? err : new Error(String(err))
+      }
+      if (!threw) {
+        throw new Error(`expected error of kind ${expectedKind}, got no throw`)
+      }
+      const got = classifyInsertBytesErr(threw)
+      const want = expectedKind.startsWith('truncated_') ? 'truncated' : expectedKind
+      if (got !== want) {
+        throw new Error(`error kind: got ${got} (${threw.message}), want ${want}`)
+      }
+    })
+  }
+}
+
+/** @param {Error} err */
+function classifyInsertBytesErr(err) {
+  const m = err.message
+  if (m.includes('invalid side')) return 'invalid_side'
+  if (m.startsWith('insert_bytes_v0: truncated')) return 'truncated'
+  return `unexpected:${m}`
+}
+
 // ---- negative: hide_v0 / show_v0 ----
 
 /**
@@ -408,12 +478,14 @@ function classifyMultiOpErr(err) {
 
 runPositiveNodeIdV0()
 runPositiveInsertV0()
+runPositiveInsertBytesV0()
 runPositiveHideShow('hide_v0', hideV0)
 runPositiveHideShow('show_v0', showV0)
 runPositiveAckV0()
 runPositiveJsonEnvelopeV0()
 runPositiveMultiOpV0()
 runNegativeInsertV0()
+runNegativeInsertBytesV0()
 runNegativeHideShow('hide_v0', hideV0)
 runNegativeHideShow('show_v0', showV0)
 runNegativeAckV0()

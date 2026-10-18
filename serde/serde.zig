@@ -5,6 +5,7 @@
 
 pub const node_id_v0 = @import("node_id_v0.zig");
 pub const insert_v0 = @import("insert_v0.zig");
+pub const insert_bytes_v0 = @import("insert_bytes_v0.zig");
 pub const hide_v0 = @import("hide_v0.zig");
 pub const show_v0 = @import("show_v0.zig");
 pub const multi_op_v0 = @import("multi_op_v0.zig");

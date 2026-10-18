@@ -48,6 +48,9 @@ Targeted runs:
 - `rogue/src/rogue.wasm.js` — the committed base64 copy of the Zig-built wasm.
   Regenerate with `cd rogue && npm run build:wasm`; never hand-edit it. A Zig
   change that is not followed by this step ships a stale JS engine.
+- `filesync/rogue_u8.wasm` — the committed byte-native wasm embedded by the Go
+  `filesync` package. Regenerate with `cd rogue && npm run build:wasm`; never
+  hand-edit it. `make wasm-check` fails if it is stale.
 - `*/dist/**`, `rogue/zig-out/**`, `.zig-cache/` — build artifacts, gitignored.
   Never commit them.
 

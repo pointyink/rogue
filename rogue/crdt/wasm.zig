@@ -187,6 +187,10 @@ export fn rogue_commit_batch() i32 {
 export fn rogue_insert(vis_ix: u32, buf_offset: u32, in_len: u32) i32 {
     const ptr: [*]align(2) u16 = @ptrCast(@alignCast(&in_buf[buf_offset]));
     const chars = ptr[0 .. in_len / 2];
+    if (chars.len == 0) {
+        out_len = 0;
+        return 1;
+    }
     doc.insert(vis_ix, chars, &op_buf) catch |err| {
         writeErrorPayload(stampErrorKind(err), null);
         return 0;
@@ -204,6 +208,10 @@ export fn rogue_insert(vis_ix: u32, buf_offset: u32, in_len: u32) i32 {
 }
 
 export fn rogue_hide(vis_ix: u32, len: u32) i32 {
+    if (len == 0) {
+        out_len = 0;
+        return 1;
+    }
     doc.hide(vis_ix, len, &op_buf) catch |err| {
         writeErrorPayload(stampErrorKind(err), null);
         return 0;

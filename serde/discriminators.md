@@ -26,6 +26,7 @@ inside `multi_op_v0`).
 |  3    | multi_op_v0 | variable    | atomic batch of ops, the unit of replication     |
 |  4    | ack_v0      | variable    | server → client durability ack (1+ group ids)    |
 |  5    | json_envelope_v0 | variable | thin wrapper carrying a JSON payload          |
+|  6    | insert_bytes_v0 | variable | byte-native CRDT insert op (raw u8 content)    |
 
 ## Framing
 

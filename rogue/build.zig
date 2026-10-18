@@ -42,8 +42,28 @@ pub fn build(b: *std.Build) void {
     });
     wasm.entry = .disabled;
     wasm.rdynamic = true;
-    const wasm_step = b.step("wasm", "Build WASM module");
-    wasm_step.dependOn(&b.addInstallArtifact(wasm, .{}).step);
+
+    // Byte-native module for the Go file-sync binding (insert_bytes_v0).
+    const wasm_u8_root = b.createModule(.{
+        .root_source_file = b.path("crdt/wasm_u8.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+    });
+    wasm_u8_root.addImport("serde", serde_module);
+    const wasm_u8 = b.addExecutable(.{
+        .name = "rogue_u8",
+        .root_module = wasm_u8_root,
+    });
+    wasm_u8.entry = .disabled;
+    wasm_u8.rdynamic = true;
+
+    const install_u16 = b.addInstallArtifact(wasm, .{});
+    const install_u8 = b.addInstallArtifact(wasm_u8, .{});
+    const wasm_step = b.step("wasm", "Build WASM modules");
+    wasm_step.dependOn(&install_u16.step);
+    wasm_step.dependOn(&install_u8.step);
+    const wasm_u8_step = b.step("wasm-u8", "Build the byte-native WASM module");
+    wasm_u8_step.dependOn(&install_u8.step);
 
     // Tests. Run a single test with:  zig build test -Dtest-filter="<name substring>"
     const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this substring");

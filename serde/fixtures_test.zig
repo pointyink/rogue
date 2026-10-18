@@ -9,6 +9,7 @@ const std = @import("std");
 const node_id_v0 = @import("node_id_v0.zig");
 const multi_op_v0 = @import("multi_op_v0.zig");
 const insert_v0 = @import("insert_v0.zig");
+const insert_bytes_v0 = @import("insert_bytes_v0.zig");
 const hide_v0 = @import("hide_v0.zig");
 const show_v0 = @import("show_v0.zig");
 const ack_v0 = @import("ack_v0.zig");
@@ -192,6 +193,99 @@ fn checkInsertV0Negative(allocator: std.mem.Allocator, dir: std.fs.Dir, name: []
         if (!std.mem.eql(u8, got_kind, expected_kind)) {
             std.debug.print(
                 "\ninsert_v0/{s}: got error kind '{s}' ({any}), want '{s}'\n",
+                .{ name, got_kind, err, expected_kind },
+            );
+            return FixtureError.WrongErrorKind;
+        }
+    }
+}
+
+// ---- insert_bytes_v0 ----
+
+fn checkInsertBytesV0Positive(allocator: std.mem.Allocator, dir: std.fs.Dir, name: []const u8) !void {
+    var case_dir = try dir.openDir(name, .{});
+    defer case_dir.close();
+
+    const bytes = try readFileAlloc(allocator, case_dir, "bytes.bin");
+    defer allocator.free(bytes);
+    const value_raw = try readFileAlloc(allocator, case_dir, "value.json");
+    defer allocator.free(value_raw);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, value_raw, .{});
+    defer parsed.deinit();
+    const v = parsed.value;
+    const id_v = jsonGet(v, "id");
+    const parent_v = jsonGet(v, "parent");
+    const want_id_replica: u16 = @intCast(jsonGet(id_v, "replica_id").integer);
+    const want_id_seq: u32 = @intCast(jsonGet(id_v, "sequence").integer);
+    const want_parent_replica: u16 = @intCast(jsonGet(parent_v, "replica_id").integer);
+    const want_parent_seq: u32 = @intCast(jsonGet(parent_v, "sequence").integer);
+    const want_side_str = jsonGet(v, "side").string;
+    const want_bytes_hex = jsonGet(v, "bytes_hex").string;
+
+    // decode → field match
+    const decoded = try insert_bytes_v0.decode(allocator, bytes);
+    defer allocator.free(decoded.bytes);
+
+    if (decoded.id.replica_id != want_id_replica or decoded.id.sequence != want_id_seq) {
+        std.debug.print("\ninsert_bytes_v0/{s} id mismatch\n", .{name});
+        return FixtureError.FixtureMismatch;
+    }
+    if (decoded.parent.replica_id != want_parent_replica or decoded.parent.sequence != want_parent_seq) {
+        std.debug.print("\ninsert_bytes_v0/{s} parent mismatch\n", .{name});
+        return FixtureError.FixtureMismatch;
+    }
+    const got_side_str = sideToString(decoded.side);
+    if (!std.mem.eql(u8, got_side_str, want_side_str)) {
+        std.debug.print("\ninsert_bytes_v0/{s} side: got '{s}', want '{s}'\n", .{ name, got_side_str, want_side_str });
+        return FixtureError.FixtureMismatch;
+    }
+    const want_bytes = try hexDecode(allocator, want_bytes_hex);
+    defer allocator.free(want_bytes);
+    try bytesEqualReport(name, decoded.bytes, want_bytes);
+
+    // encode → bytes match.
+    const side = try sideFromString(want_side_str);
+    const enc = try allocator.alloc(u8, insert_bytes_v0.encodedSize(want_bytes.len));
+    defer allocator.free(enc);
+    _ = insert_bytes_v0.encode(
+        .{ .replica_id = want_id_replica, .sequence = want_id_seq },
+        .{ .replica_id = want_parent_replica, .sequence = want_parent_seq },
+        side,
+        want_bytes,
+        enc,
+    );
+    try bytesEqualReport(name, enc, bytes);
+}
+
+fn checkInsertBytesV0Negative(allocator: std.mem.Allocator, dir: std.fs.Dir, name: []const u8) !void {
+    var case_dir = try dir.openDir(name, .{});
+    defer case_dir.close();
+
+    const bytes = try readFileAlloc(allocator, case_dir, "bytes.bin");
+    defer allocator.free(bytes);
+    const kind_raw = try readFileAlloc(allocator, case_dir, "error.txt");
+    defer allocator.free(kind_raw);
+    const expected_kind_raw = std.mem.trim(u8, kind_raw, &std.ascii.whitespace);
+    const expected_kind = if (std.mem.startsWith(u8, expected_kind_raw, "truncated_"))
+        "truncated"
+    else
+        expected_kind_raw;
+
+    const result = insert_bytes_v0.decode(allocator, bytes);
+    if (result) |decoded| {
+        allocator.free(decoded.bytes);
+        std.debug.print("\ninsert_bytes_v0/{s}: expected error {s}, got success\n", .{ name, expected_kind });
+        return FixtureError.MissingExpectedError;
+    } else |err| {
+        const got_kind = switch (err) {
+            error.Truncated => "truncated",
+            error.InvalidSide => "invalid_side",
+            else => "unexpected",
+        };
+        if (!std.mem.eql(u8, got_kind, expected_kind)) {
+            std.debug.print(
+                "\ninsert_bytes_v0/{s}: got error kind '{s}' ({any}), want '{s}'\n",
                 .{ name, got_kind, err, expected_kind },
             );
             return FixtureError.WrongErrorKind;
@@ -593,6 +687,26 @@ test "negative fixtures: insert_v0" {
         "serde/fixtures/negative/insert_v0",
         @TypeOf(checkInsertV0Negative),
         checkInsertV0Negative,
+    );
+}
+
+test "positive fixtures: insert_bytes_v0" {
+    const allocator = std.testing.allocator;
+    try walkDir(
+        allocator,
+        "serde/fixtures/positive/insert_bytes_v0",
+        @TypeOf(checkInsertBytesV0Positive),
+        checkInsertBytesV0Positive,
+    );
+}
+
+test "negative fixtures: insert_bytes_v0" {
+    const allocator = std.testing.allocator;
+    try walkDir(
+        allocator,
+        "serde/fixtures/negative/insert_bytes_v0",
+        @TypeOf(checkInsertBytesV0Negative),
+        checkInsertBytesV0Negative,
     );
 }
 

@@ -47,6 +47,8 @@ func main() {
 	writeMultiOpV0Negative()
 	writeInsertV0Positive()
 	writeInsertV0Negative()
+	writeInsertBytesV0Positive()
+	writeInsertBytesV0Negative()
 	writeHideV0Positive()
 	writeHideV0Negative()
 	writeShowV0Positive()
@@ -455,6 +457,93 @@ func writeInsertV0Negative() {
 	}
 }
 
+// ---- insert_bytes_v0 ----
+
+type insertBytesValue struct {
+	Type     string     `json:"type"`
+	Id       nodeIdJSON `json:"id"`
+	Parent   nodeIdJSON `json:"parent"`
+	Side     string     `json:"side"`
+	BytesHex string     `json:"bytes_hex"`
+}
+
+func writeInsertBytesV0Positive() {
+	allBytes := make([]byte, 256)
+	for i := range allBytes {
+		allBytes[i] = byte(i)
+	}
+	large := make([]byte, 4096)
+	for i := range large {
+		large[i] = byte(i % 251)
+	}
+
+	cases := []struct {
+		name   string
+		id     serde.NodeIdV0
+		parent serde.NodeIdV0
+		side   serde.InsertV0Side
+		bytes  []byte
+	}{
+		{"empty_bytes_left", serde.NodeIdV0{ReplicaId: 1, Sequence: 10}, serde.NodeIdV0{ReplicaId: 1, Sequence: 9}, serde.InsertV0SideLeft, []byte{}},
+		{"ascii_hi_right", serde.NodeIdV0{ReplicaId: 7, Sequence: 100}, serde.NodeIdV0{ReplicaId: 7, Sequence: 99}, serde.InsertV0SideRight, []byte("Hi")},
+		{"ascii_hello_world_right", serde.NodeIdV0{ReplicaId: 2, Sequence: 50}, serde.NodeIdV0{ReplicaId: 2, Sequence: 49}, serde.InsertV0SideRight, []byte("Hello, world!")},
+		{"root_insert", serde.NodeIdV0{ReplicaId: 1, Sequence: 1}, serde.NodeIdV0{ReplicaId: 0, Sequence: 0}, serde.InsertV0SideRoot, []byte("A")},
+		{"all_byte_values", serde.NodeIdV0{ReplicaId: 5, Sequence: 200}, serde.NodeIdV0{ReplicaId: 5, Sequence: 199}, serde.InsertV0SideRight, allBytes},
+		{"nul_and_high_bytes", serde.NodeIdV0{ReplicaId: 3, Sequence: 7}, serde.NodeIdV0{ReplicaId: 3, Sequence: 6}, serde.InsertV0SideRight, []byte{0x00, 0x01, 0x7F, 0x80, 0xFE, 0xFF, 0x00}},
+		{"large_bytes_right", serde.NodeIdV0{ReplicaId: 9, Sequence: 1}, serde.NodeIdV0{ReplicaId: 9, Sequence: 0}, serde.InsertV0SideRight, large},
+		{"endian_probe", serde.NodeIdV0{ReplicaId: 0x0201, Sequence: 0x06050403}, serde.NodeIdV0{ReplicaId: 0x0A09, Sequence: 0x0E0D0C0B}, serde.InsertV0SideRight, []byte{0xDE, 0xAD, 0xBE, 0xEF}},
+	}
+
+	for _, c := range cases {
+		buf := make([]byte, serde.InsertBytesV0EncodedSize(len(c.bytes)))
+		serde.InsertBytesV0Encode(c.id, c.parent, c.side, c.bytes, buf)
+		writePositive("insert_bytes_v0", c.name, buf, insertBytesValue{
+			Type:     "insert_bytes_v0",
+			Id:       nodeIdJSON{ReplicaId: c.id.ReplicaId, Sequence: c.id.Sequence},
+			Parent:   nodeIdJSON{ReplicaId: c.parent.ReplicaId, Sequence: c.parent.Sequence},
+			Side:     c.side.String(),
+			BytesHex: hex.EncodeToString(c.bytes),
+		})
+	}
+}
+
+func writeInsertBytesV0Negative() {
+	negative := []struct {
+		name      string
+		bytes     []byte
+		errorKind string
+	}{
+		{"truncated_header_empty", []byte{}, "truncated_header"},
+		{"truncated_header_partial", make([]byte, 10), "truncated_header"},
+		{"invalid_side_byte", func() []byte {
+			b := make([]byte, 17)
+			b[12] = 99
+			return b
+		}(), "invalid_side"},
+		{"invalid_side_high", func() []byte {
+			b := make([]byte, 17)
+			b[12] = 0xFF
+			return b
+		}(), "invalid_side"},
+		{"truncated_bytes_short", func() []byte {
+			b := make([]byte, 17+2)
+			b[12] = 1
+			binary.LittleEndian.PutUint32(b[13:17], 5)
+			return b
+		}(), "truncated_bytes"},
+		{"truncated_bytes_length_overflow", func() []byte {
+			b := make([]byte, 17)
+			b[12] = 1
+			binary.LittleEndian.PutUint32(b[13:17], 0xFFFFFFFF)
+			return b
+		}(), "truncated_bytes"},
+	}
+
+	for _, c := range negative {
+		writeNegative("insert_bytes_v0", c.name, c.bytes, c.errorKind)
+	}
+}
+
 // ---- node_id_v0 ----
 
 type nodeIdValue struct {
@@ -519,6 +608,7 @@ func writeMultiOpV0Positive() {
 	hide16b := repeat(0xCC, 16)
 	show16b := repeat(0xDD, 16)
 	insertTiny := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+	insertBytesTiny := []byte{0x00, 0x01, 0xFE, 0xFF}
 	insertEmpty := []byte{}
 	insert1k := repeat(0x42, 1024)
 
@@ -551,6 +641,19 @@ func writeMultiOpV0Positive() {
 			"single_insert_empty",
 			serde.NodeIdV0{ReplicaId: 1, Sequence: 201},
 			[]serde.MultiOpV0InnerOp{{Disc: 0, Payload: insertEmpty}},
+		},
+		{
+			"single_insert_bytes",
+			serde.NodeIdV0{ReplicaId: 1, Sequence: 202},
+			[]serde.MultiOpV0InnerOp{{Disc: 6, Payload: insertBytesTiny}},
+		},
+		{
+			"mixed_insert_kinds",
+			serde.NodeIdV0{ReplicaId: 1, Sequence: 203},
+			[]serde.MultiOpV0InnerOp{
+				{Disc: 0, Payload: insertTiny},
+				{Disc: 6, Payload: insertBytesTiny},
+			},
 		},
 		{
 			"one_of_each",
