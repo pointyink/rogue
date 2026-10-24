@@ -44,7 +44,8 @@ class FakeWebSocket {
   }
 }
 
-/** [disc u16][len u32][payload] */
+/** [disc u16][len u32][payload]
+ *  @param {number} disc @param {Uint8Array} payload */
 function frame(disc, payload) {
   const out = new Uint8Array(6 + payload.length)
   const view = new DataView(out.buffer)
@@ -54,6 +55,7 @@ function frame(disc, payload) {
   return out.buffer
 }
 
+/** @param {number} replicaId @param {number} sequence @returns {Uint8Array} */
 function opPayload(replicaId, sequence) {
   const out = new Uint8Array(10)
   const view = new DataView(out.buffer)
