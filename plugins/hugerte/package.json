@@ -1,6 +1,6 @@
 {
   "name": "@pointyink/hugerte",
-  "version": "0.3.2",
+  "version": "0.3.1",
   "description": "Make HugeRTE collaborative — drop-in real-time/offline sync backed by the Pointy engine.",
   "license": "Apache-2.0",
   "repository": {
