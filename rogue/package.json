@@ -55,7 +55,8 @@
   "dependencies": {
     "@pointyink/serde": "^0.3.0",
     "diff-match-patch": "^1.0.5",
-    "dompurify": "^3.2.6"
+    "dompurify": "^3.2.6",
+    "parse5": "^7.3.0"
   },
   "devDependencies": {
     "@types/diff-match-patch": "^1.0.36",

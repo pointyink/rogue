@@ -719,6 +719,279 @@ describe('createRogueNode', () => {
       node.endLoad()
       expect(el.innerHTML).toBe('')
     })
+
+    // --- bootstrap load: validate once, walk back on failure -----------------
+    //
+    // The bootstrap merge validates nothing per op: endLoad renders once and, if
+    // invalid, walks back to the last valid prefix, drops the boundary op, and
+    // replays the tail through applyOp. A *persistently* bad op is therefore still
+    // rejected exactly like streaming delivery (the walk-back finds it). An op that
+    // is only invalid at its own prefix but valid in the final render is accepted —
+    // the deliberate semantic documented in docs/plan-load-walkback.md.
+
+    /** @param {string} html @returns {number[]} */
+    const bytes = (html) => Array.from(new TextEncoder().encode(html))
+
+    /** A root insert of raw HTML text, used to slip malformed ops into a log.
+     *  @param {number} replica @param {number} seq @param {number[]} chars
+     *  @returns {Uint8Array} */
+    function rootInsert(replica, seq, chars) {
+      const ins = insertV0.encode(
+        { replica_id: replica, sequence: seq },
+        { replica_id: 0, sequence: 0 },
+        insertV0.Side.Root,
+        chars,
+      )
+      return multiOpV0.encode(
+        { replica_id: replica, sequence: seq },
+        [{ disc: insertV0.DISC, payload: ins }],
+      )
+    }
+
+    /** Build a single-replica op log from HTML snippets. Each insert consumes
+     *  `len` sequence numbers, so they must be spaced or node ids collide.
+     *  @param {string[]} htmls @returns {Uint8Array[]} */
+    function makeLog(htmls) {
+      let seq = 1
+      return htmls.map((html) => {
+        const chars = bytes(html)
+        const p = rootInsert(2, seq, chars)
+        seq += chars.length
+        return p
+      })
+    }
+
+    /** Merge `payloads` on a fresh node — buffered as a bootstrap load, or
+     *  streamed one op at a time (live delivery).
+     *  @param {Uint8Array[]} payloads @param {boolean} bootstrap
+     *  @param {boolean} [reverse] @param {number} [replicaId] */
+    async function renderLog(payloads, bootstrap, reverse = false, replicaId = 1) {
+      const el = makeEditor()
+      const node = await createRogueNode({ element: el, replicaId })
+      const delivered = reverse ? [...payloads].reverse() : payloads
+      if (bootstrap) {
+        node.beginLoad()
+        for (const p of delivered) node.mergeOp(p)
+        node.endLoad()
+      } else {
+        for (const p of delivered) node.mergeOp(p)
+      }
+      return { el, node }
+    }
+
+    /** Assert a bootstrap load and a streamed delivery of the same log produce the
+     *  same document; returns the resulting HTML.
+     *  @param {string[]} htmls @param {boolean} [reverse] @returns {Promise<string>} */
+    async function expectBootstrapMatchesStreamed(htmls, reverse = false) {
+      const payloads = makeLog(htmls)
+      const { el } = await renderLog(payloads, true, reverse)
+      const { el: streamedEl } = await renderLog(payloads, false, reverse)
+      expect(el.innerHTML).toBe(streamedEl.innerHTML)
+      return el.innerHTML
+    }
+
+    it('matches streaming for a malformed op at each position', async () => {
+      for (const badIndex of [0, 1, 2]) {
+        const htmls = [0, 1, 2].map((i) => (i === badIndex ? '</p>' : `<p>${i + 1}</p>`))
+        const html = await expectBootstrapMatchesStreamed(htmls)
+        expect(validHtml(html)).toBe(true)
+        expect(html).not.toContain('</p></p>')
+        for (const i of [0, 1, 2].filter((i) => i !== badIndex)) {
+          expect(html).toContain(`<p>${i + 1}</p>`)
+        }
+      }
+    })
+
+    it('matches streaming for a lone malformed op', async () => {
+      expect(await expectBootstrapMatchesStreamed(['</p>'])).toBe('')
+    })
+
+    it('matches streaming for multiple malformed ops', async () => {
+      const html = await expectBootstrapMatchesStreamed([
+        '<p>1</p>', '</p>', '<p>3</p>', '</p>', '<p>5</p>',
+      ])
+      expect(validHtml(html)).toBe(true)
+      for (const n of [1, 3, 5]) expect(html).toContain(`<p>${n}</p>`)
+    })
+
+    it('keeps a split-tag log whose full render is valid (documented semantic)', async () => {
+      // <div> and </div> are invalid alone but valid together. Under the load
+      // walk-back semantic (full render valid => accept) bootstrap keeps them;
+      // live per-op delivery rejects both. Deliberate divergence — pinned here.
+      const { el } = await renderLog(makeLog(['<div>', '</div>']), true)
+      expect(el.innerHTML).toBe('<div></div>')
+      expect(validHtml(el.innerHTML)).toBe(true)
+
+      const { el: streamedEl } = await renderLog(makeLog(['<div>', '</div>']), false)
+      expect(streamedEl.innerHTML).toBe('')
+    })
+
+    it('keeps a balanced inline fragment split across ops (documented semantic)', async () => {
+      const { el } = await renderLog(makeLog(['<p>a</p>', '<b>', 'x', '</b>']), true)
+      expect(el.innerHTML).toBe('<p>a</p><b>x</b>')
+      expect(validHtml(el.innerHTML)).toBe(true)
+    })
+
+    it('walks back only the op that leaves the final render invalid', async () => {
+      const { el } = await renderLog(
+        makeLog(['<div>', '</div>', '<p>x', '</p>', '</p>']),
+        true,
+      )
+      // The full render is invalid (stray </p>); walk back past it and keep the
+      // aggregate-valid prefix.
+      expect(el.innerHTML).toBe('<div></div><p>x</p>')
+      expect(validHtml(el.innerHTML)).toBe(true)
+    })
+
+    it('converges when the buffered log arrives out of order', async () => {
+      const htmls = ['<p>1</p>', '</p>', '<p>3</p>', '<p>4</p>']
+      const forward = await expectBootstrapMatchesStreamed(htmls, false)
+      const reverse = await expectBootstrapMatchesStreamed(htmls, true)
+      expect(reverse).toBe(forward)
+    })
+
+    it('keeps applying live ops after a bootstrap that rejected a malformed op', async () => {
+      const { el, node } = await renderLog(makeLog(['<p>1</p>', '</p>', '<p>3</p>']), true)
+      expect(validHtml(el.innerHTML)).toBe(true)
+
+      // A later live op (fresh replica, no seq collision) must merge + render.
+      node.mergeOp(rootInsert(3, 1, bytes('<p>live</p>')))
+      expect(el.innerHTML).toContain('<p>live</p>')
+      expect(validHtml(el.innerHTML)).toBe(true)
+    })
+
+    it('renders a clean multi-op bootstrap and ignores an already-applied redelivery', async () => {
+      const payloads = makeLog(['<p>a</p>', '<p>b</p>', '<p>c</p>'])
+      const { el, node } = await renderLog(payloads, true)
+      expect(el.innerHTML).toBe('<p>a</p><p>b</p><p>c</p>')
+      node.mergeOp(payloads[0]) // already applied: no-op
+      expect(el.innerHTML).toBe('<p>a</p><p>b</p><p>c</p>')
+    })
+
+    it('re-delivering an op the walk-back rejected is a no-op', async () => {
+      const payloads = makeLog(['<p>1</p>', '</p>', '<p>3</p>'])
+      const { el, node } = await renderLog(payloads, true)
+      const afterLoad = el.innerHTML
+      expect(validHtml(afterLoad)).toBe(true)
+      // payloads[1] is the malformed op the recovery dropped.
+      node.mergeOp(payloads[1])
+      expect(el.innerHTML).toBe(afterLoad)
+    })
+
+    it('drains a parked op below the head after a clean load', async () => {
+      /** @param {number} replica @param {number} seq @param {number|null} parentRep @param {number} parentSeq @param {string} html */
+      const insert = (replica, seq, parentRep, parentSeq, html) => {
+        const ins = insertV0.encode(
+          { replica_id: replica, sequence: seq },
+          parentRep === null
+            ? { replica_id: 0, sequence: 0 }
+            : { replica_id: parentRep, sequence: parentSeq },
+          parentRep === null ? insertV0.Side.Root : insertV0.Side.Right,
+          bytes(html),
+        )
+        return multiOpV0.encode(
+          { replica_id: replica, sequence: seq },
+          [{ disc: insertV0.DISC, payload: ins }],
+        )
+      }
+      // Valid causality: P's seq (200) is above its parent Q's (100), and R/S
+      // push the head past P so the drain has to insert it below the head.
+      const Q = insert(1, 100, null, 0, '<p>q</p>') // "q" at seq 103
+      const P = insert(2, 200, 1, 103, '<b>p</b>') // child of Q's "q"
+      const R = insert(3, 500, null, 0, '<p>r</p>')
+      const S = insert(4, 600, null, 0, '<p>s</p>') // live at-head op that drains P
+
+      const el = makeEditor()
+      const node = await createRogueNode({ element: el, replicaId: 9 })
+      node.beginLoad()
+      node.mergeOp(P) // parent Q absent -> parks
+      node.mergeOp(Q) // at-head (the loading-time drain is gated)
+      node.mergeOp(R) // at-head
+      node.endLoad()
+      // P is still parked after the load (endLoad does not drain).
+      expect(el.innerHTML).toBe('<p>q</p><p>r</p>')
+      node.mergeOp(S) // at-head; drains P below the head (P 200 < 600)
+      expect(el.innerHTML).toContain('<b>p</b>')
+      expect(validHtml(el.innerHTML)).toBe(true)
+      expect(node.rope.serialize()).toBe(el.innerHTML)
+    })
+
+    it('applies a drained parked op in sorted order (a later out-of-order op keeps it)', async () => {
+      /** @param {number} replica @param {number} seq @param {number|null} parentRep @param {number} parentSeq @param {string} html */
+      const insert = (replica, seq, parentRep, parentSeq, html) => {
+        const ins = insertV0.encode(
+          { replica_id: replica, sequence: seq },
+          parentRep === null
+            ? { replica_id: 0, sequence: 0 }
+            : { replica_id: parentRep, sequence: parentSeq },
+          parentRep === null ? insertV0.Side.Root : insertV0.Side.Right,
+          bytes(html),
+        )
+        return multiOpV0.encode(
+          { replica_id: replica, sequence: seq },
+          [{ disc: insertV0.DISC, payload: ins }],
+        )
+      }
+      const Q = insert(1, 100, null, 0, '<p>q</p>') // "q" at 103
+      const P = insert(2, 200, 1, 103, '<b>p</b>') // child of Q's "q"
+      const R = insert(3, 500, null, 0, '<p>r</p>')
+      const S = insert(4, 600, null, 0, '<p>s</p>') // drains P
+      const F = insert(2, 300, null, 0, '<p>f</p>') // out-of-order again
+
+      const el = makeEditor()
+      const node = await createRogueNode({ element: el, replicaId: 9 })
+      node.beginLoad()
+      node.mergeOp(P) // parks
+      node.mergeOp(R)
+      node.mergeOp(Q)
+      node.endLoad()
+      node.mergeOp(S) // drains P below the head
+      node.mergeOp(F) // F(300) < head(600) -> out-of-order; must not lose P
+      expect(el.innerHTML).toContain('<b>p</b>')
+      expect(validHtml(el.innerHTML)).toBe(true)
+      expect(node.rope.serialize()).toBe(el.innerHTML)
+    })
+
+    it('does not drain during the recovery replay (parked op waits for the tail)', async () => {
+      /** @param {number} replica @param {number} seq @param {number|null} parentRep @param {number} parentSeq @param {string} html */
+      const insert = (replica, seq, parentRep, parentSeq, html) => {
+        const ins = insertV0.encode(
+          { replica_id: replica, sequence: seq },
+          parentRep === null
+            ? { replica_id: 0, sequence: 0 }
+            : { replica_id: parentRep, sequence: parentSeq },
+          parentRep === null ? insertV0.Side.Root : insertV0.Side.Right,
+          bytes(html),
+        )
+        return multiOpV0.encode(
+          { replica_id: replica, sequence: seq },
+          [{ disc: insertV0.DISC, payload: ins }],
+        )
+      }
+      const Q = insert(1, 100, null, 0, '<p>q</p>') // "q" at 103
+      const P = insert(2, 1000, 1, 103, '<b>p</b>') // high seq, child of Q
+      const DIRTY = insert(6, 200, null, 0, '</p>') // forces recovery
+      const T1 = insert(3, 300, null, 0, '<p>t1</p>')
+      const T2 = insert(4, 400, null, 0, '<p>t2</p>')
+      const L = insert(5, 500, null, 0, '<p>l</p>')
+
+      const el = makeEditor()
+      const node = await createRogueNode({ element: el, replicaId: 9 })
+      node.beginLoad()
+      node.mergeOp(P) // parks
+      node.mergeOp(Q)
+      node.mergeOp(DIRTY) // unvalidated during load
+      node.mergeOp(T1)
+      node.mergeOp(T2)
+      node.endLoad() // recovery drops DIRTY, then drains P after the tail
+      node.mergeOp(L) // out-of-order; must not lose the recovered content
+      for (const frag of ['<b>p</b>', '<p>t1</p>', '<p>t2</p>', '<p>l</p>']) {
+        expect(el.innerHTML).toContain(frag)
+      }
+      expect(el.innerHTML).toContain('<p>q')
+      expect(validHtml(el.innerHTML)).toBe(true)
+      expect(node.rope.serialize()).toBe(el.innerHTML)
+    })
   })
 
   // -------------------------------------------------------------------------

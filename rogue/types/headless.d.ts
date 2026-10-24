@@ -10,6 +10,17 @@ export function roundTripHtml(html: string, doc: Document): {
     cleaned: string;
 };
 /**
+ * DOM-free HTML round-trip check via parse5 — the parser jsdom is built on.
+ * Same fixed-point semantics as `validHtml` (parse the fragment in `context`'s
+ * tag, serialize, compare) but ~7× faster because it skips DOM construction.
+ * The headless replica uses this for HTML validation (the single load check and
+ * steady-state scoped checks); the browser keeps the native `validHtml`.
+ * @param {string} html
+ * @param {Element} [context]
+ * @returns {boolean}
+ */
+export function parse5ValidHtml(html: string, context?: Element): boolean;
+/**
  * Create a headless editor (a CRDT replica over a jsdom <div>).
  *
  * Pass `doc`/`win`/`element` to bind an existing jsdom (e.g. the MCP server owns

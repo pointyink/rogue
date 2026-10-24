@@ -87,6 +87,11 @@ export function nodeSpan(rope: NonNullable<ReturnType<typeof buildRope>>, node: 
  *   predicate for wrappers to traverse transparently — their children are kept,
  *   the wrapper's own open/close tags are dropped (e.g. TinyMCE's format-caret
  *   bookmarks, which wrap real content).
+ * @property {(html: string, context?: Element) => boolean} [validateHtml]
+ *   The HTML round-trip predicate used to validate ops. Defaults to the native
+ *   `validHtml` (clone the context tag + `innerHTML` round-trip). The headless
+ *   replica overrides it with a DOM-free `parse5` implementation — same
+ *   fixed-point semantics, ~7× faster because it skips DOM construction.
  */
 /**
  * @typedef {{
@@ -109,7 +114,7 @@ export function nodeSpan(rope: NonNullable<ReturnType<typeof buildRope>>, node: 
  * @param {RogueNodeOptions} options
  * @returns {Promise<RogueNode>}
  */
-export function createRogueNode({ element: editorRoot, replicaId, onCommit, maxOpBytes, onOpTooLarge, onDocTooLarge, onError, onChange, paste, doc, win, serializeNode, omitNode, unwrapNode, }: RogueNodeOptions): Promise<RogueNode>;
+export function createRogueNode({ element: editorRoot, replicaId, onCommit, maxOpBytes, onOpTooLarge, onDocTooLarge, onError, onChange, paste, doc, win, serializeNode, omitNode, unwrapNode, validateHtml, }: RogueNodeOptions): Promise<RogueNode>;
 export type RogueNodeOptions = {
     /**
      * The container the engine renders into and
@@ -204,6 +209,13 @@ export type RogueNodeOptions = {
      * bookmarks, which wrap real content).
      */
     unwrapNode?: import("./dom_rope.js").UnwrapNode | undefined;
+    /**
+     * The HTML round-trip predicate used to validate ops. Defaults to the native
+     * `validHtml` (clone the context tag + `innerHTML` round-trip). The headless
+     * replica overrides it with a DOM-free `parse5` implementation — same
+     * fixed-point semantics, ~7× faster because it skips DOM construction.
+     */
+    validateHtml?: ((html: string, context?: Element) => boolean) | undefined;
 };
 export type RogueNode = {
     mergeOp: (payload: Uint8Array) => void;
