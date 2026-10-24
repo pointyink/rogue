@@ -137,6 +137,11 @@ export function nodeSpan(rope, node) {
  *   predicate for wrappers to traverse transparently — their children are kept,
  *   the wrapper's own open/close tags are dropped (e.g. TinyMCE's format-caret
  *   bookmarks, which wrap real content).
+ * @property {(html: string, context?: Element) => boolean} [validateHtml]
+ *   The HTML round-trip predicate used to validate ops. Defaults to the native
+ *   `validHtml` (clone the context tag + `innerHTML` round-trip). The headless
+ *   replica overrides it with a DOM-free `parse5` implementation — same
+ *   fixed-point semantics, ~7× faster because it skips DOM construction.
  */
 
 /**
@@ -176,6 +181,7 @@ export async function createRogueNode({
   serializeNode = defaultSerializeNode,
   omitNode = defaultOmitNode,
   unwrapNode = defaultUnwrapNode,
+  validateHtml = validHtml,
 }) {
   const wasmBytes = Uint8Array.from(atob(wasmBase64), (c) => c.charCodeAt(0));
 
@@ -445,9 +451,9 @@ export async function createRogueNode({
       return rogue_merge(writeBytes(payload));
     },
 
-    /** @param {number} k */
+    /** @param {number} k @returns {number} groups actually reverted */
     revertTail(k) {
-      rogue_revert_tail(k);
+      return rogue_revert_tail(k);
     },
 
     /** Step inward from a captured region's outside brackets to the ids of the
@@ -637,7 +643,7 @@ export async function createRogueNode({
         const ids = crdt.contentRange(scope);
         const html = ids ? crdt.render(ids.startId, ids.endId) : "";
         if (html === null) continue; // stale scope fencepost — try the next scope
-        if (validHtml(html, scope.parent)) {
+        if (validateHtml(html, scope.parent)) {
           dom.swap(scope.before, scope.after, scope.parent, html);
           dom.resyncRope(scope);
           return true;
@@ -1056,9 +1062,15 @@ export async function createRogueNode({
   }
 
   // During initial bootstrap (beginLoad → endLoad) ops are merged into the CRDT
-  // but rendering is deferred — the doc loads as a single innerHTML set instead
-  // of re-rendering once per incoming op.
+  // but neither rendered nor validated per op. endLoad validates the final render
+  // once and walks back on failure (recoverLoad). See docs/plan-load-walkback.md.
   let loading = false;
+  // True while endLoad replays the tail after a walk-back: suppresses host
+  // callbacks so a load settles like one render, not N remote ops.
+  let booting = false;
+  // Re-entrancy guard for drainParked: it routes below-head parked ops through
+  // applyOp, whose own tail calls drainParked again.
+  let draining = false;
 
   // The affected vis-index range of the most recent change, set by applyDiff /
   // applyOp and consumed by finishSync's onChange so it fires after the rope has
@@ -1665,16 +1677,43 @@ export async function createRogueNode({
     if (!maxGid || cmpGid(gid, maxGid) > 0) maxGid = gid;
   }
 
-  /** Attempt all parked ops. Returns true if any were merged. */
+  /** Attempt all parked ops. Returns true if any were merged.
+   *
+   *  Ops whose gid is below the head must go through applyOp's ordering path
+   *  (revert the tail, insert in (seq, replica) order, replay), NOT be merged
+   *  directly: appending them would leave the CRDT's group_order unsorted, and
+   *  revertTail would then unwind the wrong groups.
+   */
   function drainParked() {
+    if (draining) return false;
+    draining = true;
     let any = false;
-    for (let i = parkedOps.length - 1; i >= 0; i--) {
-      if (crdt.merge(parkedOps[i])) {
-        trackApplied(gidOf(parkedOps[i]), parkedOps[i]);
-        parkedOps.splice(i, 1);
-        any = true;
-        i = parkedOps.length;
+    try {
+      let progress = true;
+      while (progress) {
+        progress = false;
+        const queue = parkedOps.splice(0);
+        let processed = 0;
+        try {
+          for (; processed < queue.length; processed++) {
+            const payload = queue[processed];
+            const key = gidKey(gidOf(payload));
+            applyOp(payload);
+            if (appliedKeys.has(key)) {
+              any = true;
+              progress = true;
+            }
+          }
+        } catch (err) {
+          // applyOp can call host hooks that throw. Restore everything not yet
+          // attempted (including the one that threw — applyOp is idempotent), so
+          // a host exception can't silently drop the parked queue.
+          parkedOps.unshift(...queue.slice(processed));
+          throw err;
+        }
       }
+    } finally {
+      draining = false;
     }
     return any;
   }
@@ -1703,8 +1742,12 @@ export async function createRogueNode({
    *
    * Falls back to full rerender if partial can't be determined.
    * @param {Uint8Array} payload
+   * @param {boolean} [forceHead] Treat the op as at-head even if its gid sorts
+   *   before `maxGid`. Used when replaying a reverted tail in application order
+   *   (recoverLoad): the ops were already applied, so they must merge, validate
+   *   and render in that order rather than re-entering the out-of-order path.
    */
-  function applyOp(payload) {
+  function applyOp(payload, forceHead = false) {
     // Drain pending local edits before merging a remote op (see drainLocal).
     drainLocal();
 
@@ -1719,7 +1762,7 @@ export async function createRogueNode({
     // and for whole-doc ops.
     const opBounds = loading ? null : crdt.visIxBounds(payload);
     const regionLevels = opBounds ? dom.regionForVisBounds(opBounds) : null;
-    const atHead = !maxGid || cmpGid(gid, maxGid) > 0;
+    const atHead = forceHead || !maxGid || cmpGid(gid, maxGid) > 0;
 
     if (atHead) {
       // Merge the incoming op. 0 → park (dependency missing); -1 → drop
@@ -1744,20 +1787,19 @@ export async function createRogueNode({
       // Validate + render. renderOp walks the scopes (tight → top-level block),
       // swapping at the first whose html balances; falling through every scope is
       // the signal the merged content is invalid HTML → reject (revert). Whole-doc
-      // ops, forced-full, and bootstrap (loading — no scopes) validate the full
-      // render directly. On reject the DOM was never mutated (renderOp only swaps
-      // on success), so no re-render is needed.
+      // and forced-full ops validate the full render directly. On reject the DOM
+      // was never mutated (renderOp only swaps on success), so no re-render needed.
+      // Bootstrap (loading) merges unvalidated; endLoad validates the final render
+      // once and walks back on failure (recoverLoad).
       let rejectedOp = false;
       if (!loading) {
         if (regionLevels && !forceFullSync()) {
           rejectedOp = !dom.renderOp(regionLevels);
-        } else if (validHtml(crdt.render() ?? "", editorRoot)) {
+        } else if (validateHtml(crdt.render() ?? "", editorRoot)) {
           dom.fullRender();
         } else {
           rejectedOp = true;
         }
-      } else if (!validHtml(crdt.render() ?? "", editorRoot)) {
-        rejectedOp = true;
       }
 
       if (rejectedOp) {
@@ -1770,7 +1812,7 @@ export async function createRogueNode({
 
       // Incoming op may have unblocked parked ops — drain them (full render if any
       // applied).
-      if (!loading && drainParked()) dom.fullRender();
+      if (!loading && !booting && drainParked()) dom.fullRender();
     } else {
       // Out-of-order: the incoming op sorts somewhere before the current head.
       // Only the tail (the groups that now sort after it) needs to be un-applied
@@ -1809,7 +1851,7 @@ export async function createRogueNode({
       // flows through the normal merge → localized round-trip → surgical render path.
       for (const g of replay) applyOp(g.payload);
 
-      const drained = drainParked();
+      const drained = !booting && drainParked();
       if (!loading && drained) dom.fullRender();
     }
 
@@ -1818,8 +1860,82 @@ export async function createRogueNode({
       assertConsistent("mergeOp");
       // Fire onChange after the render (remote op / undo / redo) so anchored
       // ranges can re-resolve against the updated DOM. Out-of-order replay fires
-      // it once per replayed op too — idempotent for consumers.
-      onChange?.(opBounds);
+      // it once per replayed op too — idempotent for consumers. Suppressed while
+      // endLoad replays a walk-back tail (a load should settle once).
+      if (!booting) onChange?.(opBounds);
+    }
+  }
+
+  /**
+   * The merged bootstrap log renders invalid HTML. Walk back from the fold-order
+   * tail until the prefix renders valid; the last popped op is the boundary
+   * ("dirty"). Drop it, then replay the remaining popped ops through applyOp,
+   * which validates each op and rejects any further bad ones.
+   *
+   * This is the deliberate "the full render is valid" semantic (see
+   * docs/plan-load-walkback.md): an op that is invalid at its own prefix but valid
+   * once later ops arrive is accepted. The ordinary conflict path — where the bad
+   * op keeps the final render invalid — still matches per-op rejection.
+   */
+  function recoverLoad() {
+    // `appliedGroups` is kept in CRDT application order — the order `revertTail`
+    // unwinds — so walk it as stored. Sorting by gid would break the 1:1
+    // correspondence with the CRDT's `group_order` once dependent ops have been
+    // parked or replayed (application order is not gid order).
+    /** @type {{ gid: Gid, payload: Uint8Array }[]} */
+    const popped = [];
+    /** @type {{ gid: Gid, payload: Uint8Array } | null} */
+    let dirty = null;
+
+    while (appliedGroups.length > 0) {
+      const g = /** @type {{ gid: Gid, payload: Uint8Array }} */ (appliedGroups.pop());
+      const reverted = crdt.revertTail(1);
+      appliedKeys.delete(gidKey(g.gid));
+      popped.push(g);
+      if (reverted !== 1) {
+        // The CRDT could not unwind the group we popped: the ledger and the
+        // engine disagree. Surface it; the guard below logs and replays.
+        console.error("[sync] load recovery revert mismatch", { gid: g.gid, reverted });
+        onError?.({ type: -1, name: "load_recovery_failed" });
+        break;
+      }
+      if (validateHtml(crdt.render() ?? "", editorRoot)) {
+        dirty = g;
+        break;
+      }
+    }
+
+    if (!dirty) {
+      // The empty document always validates, so reaching here means a revert did
+      // not line up with the ledger. Surface it rather than silently installing a
+      // still-invalid render.
+      console.error("[sync] load recovery found no valid prefix", { popped: popped.length });
+      onError?.({ type: -1, name: "load_recovery_failed" });
+    } else {
+      rejected.add(gidKey(dirty.gid));
+    }
+
+    // Application order is not gid order, so the head is the max over the prefix.
+    maxGid = null;
+    for (const g of appliedGroups) {
+      if (!maxGid || cmpGid(g.gid, maxGid) > 0) maxGid = g.gid;
+    }
+
+    // Render the valid prefix, then replay the tail (oldest first) without the
+    // boundary op. forceHead skips the gid-based out-of-order path: these ops were
+    // already applied, so they merge/validate/render in their original order.
+    dom.forceFullRender();
+    popped.reverse();
+    if (dirty) popped.shift();
+
+    booting = true;
+    try {
+      for (const g of popped) applyOp(g.payload, true);
+      // The tail is replayed in order, so appliedGroups is gid-sorted again; only
+      // now is it safe to drain (a drain can reorder application order).
+      if (drainParked()) dom.fullRender();
+    } finally {
+      booting = false;
     }
   }
 
@@ -1836,15 +1952,26 @@ export async function createRogueNode({
     },
 
     /** Enter bootstrap mode: subsequent mergeOp calls merge into the CRDT but
-     *  don't render. Call endLoad() once the initial sync has fully loaded. */
+     *  neither render nor validate per op. Call endLoad() once the initial sync
+     *  has fully loaded; it validates the final render once. */
     beginLoad() {
       loading = true;
     },
 
-    /** Exit bootstrap mode and render the now-complete CRDT once. Idempotent. */
+    /** Exit bootstrap mode: validate the now-complete CRDT once and render it.
+     *  If the final render is invalid, walk back to the last good prefix, drop the
+     *  boundary op, and replay the tail (recoverLoad). Idempotent. */
     endLoad() {
       if (!loading) return;
       loading = false;
+      // Do NOT drain parked ops here: a parked op's gid can sort below the head,
+      // and appending it to the CRDT's application-order stack would break the
+      // sorted-tail assumption the out-of-order path relies on. Parked ops are
+      // drained by the next live applyOp instead (as before).
+      if (!validateHtml(crdt.render() ?? "", editorRoot)) {
+        recoverLoad();
+        return;
+      }
       dom.forceFullRender();
     },
 

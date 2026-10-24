@@ -11,7 +11,11 @@
 // the tests use.
 
 import { JSDOM } from 'jsdom'
+import * as parse5 from 'parse5'
 import { createRogueNode } from './sync.js'
+
+/** HTML elements whose innerHTML content is raw text (not markup). */
+const RAW_TEXT = new Set(['script', 'style', 'noscript'])
 import { buildRope, defaultSerializeNode, defaultOmitNode, defaultUnwrapNode } from './dom_rope.js'
 
 /** Let the engine's MutationObserver deliver + process pending mutations. */
@@ -30,6 +34,50 @@ export function roundTripHtml(html, doc) {
   const rope = buildRope(tmp, defaultSerializeNode, defaultOmitNode, defaultUnwrapNode)
   const cleaned = rope ? rope.serialize() : ''
   return { ok: cleaned === html, cleaned }
+}
+
+/**
+ * DOM-free HTML round-trip check via parse5 — the parser jsdom is built on.
+ * Same fixed-point semantics as `validHtml` (parse the fragment in `context`'s
+ * tag, serialize, compare) but ~7× faster because it skips DOM construction.
+ * The headless replica uses this for HTML validation (the single load check and
+ * steady-state scoped checks); the browser keeps the native `validHtml`.
+ * @param {string} html
+ * @param {Element} [context]
+ * @returns {boolean}
+ */
+export function parse5ValidHtml(html, context) {
+  if (html === '') return true // empty round-trips in every context
+  // Fragment parsing depends on the context element's local name, namespace, and
+  // attributes (e.g. <annotation-xml encoding="text/html"> is an HTML integration
+  // point). localName preserves foreign (SVG/MathML) camelCase.
+  const name = context ? context.localName || context.tagName.toLowerCase() : 'div'
+  const ns = context?.namespaceURI ?? 'http://www.w3.org/1999/xhtml'
+  /** @type {any} */
+  const ctx = {
+    nodeName: name,
+    tagName: name,
+    localName: name,
+    attrs: context
+      ? Array.from(/** @type {any} */ (context.attributes), (a) => ({
+          name: a.name,
+          value: a.value,
+        }))
+      : [],
+    namespaceURI: ns,
+    childNodes: [],
+    parentNode: null,
+  }
+  // parse5's overloads confuse tsc with a synthetic context node; call it untyped.
+  const parseFragment = /** @type {any} */ (parse5.parseFragment)
+  const frag = parseFragment(ctx, html)
+  // Raw-text contexts: innerHTML returns the text literally, but serializing the
+  // fragment escapes it. Compare the parsed text node to the input instead.
+  if (ns === 'http://www.w3.org/1999/xhtml' && RAW_TEXT.has(name)) {
+    const nodes = frag.childNodes
+    return nodes.length === 1 && nodes[0].nodeName === '#text' && nodes[0].value === html
+  }
+  return parse5.serialize(frag) === html
 }
 
 /**
@@ -61,6 +109,7 @@ export async function createHeadlessEditor({ replicaId, onCommit, doc, win, elem
     doc,
     win,
     replicaId,
+    validateHtml: parse5ValidHtml,
     paste: false, // the sidecar owns insert validation; skip the engine's execCommand paste path
     onCommit: (payload) => {
       for (const cb of subscribers) cb(payload)
