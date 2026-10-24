@@ -62,6 +62,11 @@ function frameVariable(disc, payload) {
 /**
  * @typedef {'connecting' | 'connected' | 'disconnected'} SyncStatus
  *
+ * `persist` defaults to true: every merged op is appended to the IndexedDB doc
+ * cache so a browser reload can resume offline. Server-side replicas that never
+ * reload from local storage should pass false — the per-op cache writes dominate
+ * cold-load time at scale, and the cache only grows for the process lifetime.
+ *
  * @typedef {{
  *   wsUrl: string,
  *   docId: string,
@@ -74,6 +79,7 @@ function frameVariable(disc, payload) {
  *   onCommentChanged?: (info: { comment_id: string, op: string }) => void,
  *   onSuggestionChanged?: (info: { suggestion_id: string, op: string }) => void,
  *   onDocDeleted?: (docId: string) => void,
+ *   persist?: boolean,
  * }} SyncClientOptions
  *
  * @typedef {{
@@ -92,7 +98,7 @@ const WS_PROTOCOL = 'rogue.jwt'
  * @param {SyncClientOptions} options
  * @returns {SyncClient}
  */
-export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, onReady, onSyncStart, onProgress, onCommentChanged, onSuggestionChanged, onDocDeleted }) {
+export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, onReady, onSyncStart, onProgress, onCommentChanged, onSuggestionChanged, onDocDeleted, persist = true }) {
   /** @type {WebSocket | null} */
   let ws = null
   let retryDelay = 1000
@@ -141,7 +147,7 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
     mergeAndAdvance(mergeOp, watermark, payload)
     completedBytes += payload.byteLength
     reportProgress(false)
-    if (cache) {
+    if (persist && cache) {
       cacheOp(docId, payload).catch((err) =>
         console.error('[sync-client] cache write failed:', err),
       )
@@ -350,9 +356,11 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
     // Our own op is already merged locally — advance the watermark so we don't
     // re-download it on the next reconnect, and cache it so a reload replays it.
     advanceWatermark(watermark, payload)
-    cacheOp(docId, payload).catch((err) =>
-      console.error('[sync-client] cache write failed:', err),
-    )
+    if (persist) {
+      cacheOp(docId, payload).catch((err) =>
+        console.error('[sync-client] cache write failed:', err),
+      )
+    }
     opChain = opChain
       .then(async () => {
         const id = extractGroupId(payload)
@@ -391,6 +399,10 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
    */
   async function bootstrap() {
     setStatus('connecting')
+    if (!persist) {
+      connect()
+      return
+    }
     try {
       const cached = await cachedOps(docId)
       if (cached.length > 0) {
