@@ -14,7 +14,10 @@ plus the JS DOM sync layer and editor plugins. Four npm packages live here:
 | `plugins/tinymce/` | `@pointyink/tinymce` |
 | `plugins/hugerte/` | `@pointyink/hugerte` |
 
-Toolchains: Node 22+, Zig 0.15.2, Go (see `go.mod`). Run `npm ci` at the repo
+Toolchains: Node 22–24 (CI pins 22), Zig 0.15.2, Go (see `go.mod`). Node ≥25
+defines a global `localStorage` that shadows jsdom's, so `replica.test.js` and
+the `sync-client` checkpoint tests fail with `Cannot read properties of
+undefined (reading 'clear')` — run the suite on 22 or 24. Run `npm ci` at the repo
 root once.
 
 ## Verify
