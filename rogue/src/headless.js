@@ -133,8 +133,10 @@ function makeEditorApi({ node, doc, element, debug, subscribers }) {
     /** The DOM element the engine is bound to. */
     element,
 
-    /** The current document as rope-canonical HTML. */
-    getHtml: () => debug.render(),
+    /** The current document as rope-canonical HTML. Kept as `getHtml` because
+     *  this editor is HTML by construction; `node.getString()` is the
+     *  markup-agnostic equivalent. */
+    getHtml: () => node.getString(),
 
     /** Visible character length (HTML length) of the document. */
     getVisLen: () => debug.visLen(),

@@ -9,6 +9,7 @@ vi.mock('./oplog.js', () => ({
   enqueue: vi.fn(() => Promise.resolve()),
   ackMany: vi.fn(() => Promise.resolve()),
   pendingFor: vi.fn(() => Promise.resolve([])),
+  pendingCount: vi.fn(() => Promise.resolve(0)),
   clearDoc: vi.fn(() => Promise.resolve()),
 }))
 vi.mock('./doc-cache.js', () => ({

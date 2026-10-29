@@ -27,6 +27,9 @@
  *   onCommit?: (payload: Uint8Array) => void,
  *   onOpTooLarge?: (bytes: number, limit: number) => void,
  *   onDocTooLarge?: () => void,
+ *   onSyncStart?: (bytes: number) => void,
+ *   sizeWarn?: { ops?: number, opBytes?: number, crdtBytes?: number },
+ *   onSizeWarning?: (stats: import('./sync.js').NodeStats, key: 'ops' | 'opBytes' | 'crdtBytes') => void,
  *   onError?: (error: import('./crdt_error.js').CrdtError) => void,
  *   onDocDeleted?: (docId: string) => void,
  *   comments?: {
@@ -44,13 +47,14 @@
  * engine node and (if enabled) the comments/suggestions APIs.
  *
  * @param {EditorSessionOptions} options
- * @returns {Promise<{ node: import('./sync.js').RogueNode, comments: import('./comments.js').Comments | null, suggestions: import('./suggestions.js').Suggestions | null, deleteDoc: () => void }>}
+ * @returns {Promise<{ node: import('./sync.js').RogueNode, comments: import('./comments.js').Comments | null, suggestions: import('./suggestions.js').Suggestions | null, deleteDoc: () => void, pendingCount: () => Promise<number> }>}
  */
-export function createEditorSession({ element, doc, win, serializeNode, omitNode, unwrapNode, setMode, getCollapsedSelection, getSelectionRange, onClick, paste, wsUrl, docId, getToken, isNewDoc, readOnly, onStatus, onProgress, onReady, onCommit, onOpTooLarge, onDocTooLarge, onError, onDocDeleted, comments: commentsOpt, suggestions: suggestionsOpt, }: EditorSessionOptions): Promise<{
+export function createEditorSession({ element, doc, win, serializeNode, omitNode, unwrapNode, setMode, getCollapsedSelection, getSelectionRange, onClick, paste, wsUrl, docId, getToken, isNewDoc, readOnly, onStatus, onProgress, onReady, onCommit, onOpTooLarge, onDocTooLarge, onSyncStart, sizeWarn, onSizeWarning, onError, onDocDeleted, comments: commentsOpt, suggestions: suggestionsOpt, }: EditorSessionOptions): Promise<{
     node: import("./sync.js").RogueNode;
     comments: import("./comments.js").Comments | null;
     suggestions: import("./suggestions.js").Suggestions | null;
     deleteDoc: () => void;
+    pendingCount: () => Promise<number>;
 }>;
 /**
  * The editor surface a host adapts for the shared session. Host-specific.
@@ -83,6 +87,13 @@ export type EditorSessionOptions = EditorSurface & {
     onCommit?: (payload: Uint8Array) => void;
     onOpTooLarge?: (bytes: number, limit: number) => void;
     onDocTooLarge?: () => void;
+    onSyncStart?: (bytes: number) => void;
+    sizeWarn?: {
+        ops?: number;
+        opBytes?: number;
+        crdtBytes?: number;
+    };
+    onSizeWarning?: (stats: import("./sync.js").NodeStats, key: "ops" | "opBytes" | "crdtBytes") => void;
     onError?: (error: import("./crdt_error.js").CrdtError) => void;
     onDocDeleted?: (docId: string) => void;
     comments?: {

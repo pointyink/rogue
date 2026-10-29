@@ -16,7 +16,7 @@
 // `onCommit` into `syncClient.send`. Status changes (`connecting`/`connected`/
 // `disconnected`) are reported via the optional `onStatus` callback.
 
-import { enqueue, ackMany, pendingFor, clearDoc as clearOplogDoc } from './oplog.js'
+import { enqueue, ackMany, pendingFor, pendingCount as pendingCountOp, clearDoc as clearOplogDoc } from './oplog.js'
 import { cacheOp, cachedOps, clearDoc as clearCacheDoc } from './doc-cache.js'
 import { advanceWatermark, mergeAndAdvance, appendSince } from './checkpoint.js'
 import * as multiOpV0 from '@pointyink/serde/multi_op_v0'
@@ -87,6 +87,7 @@ function frameVariable(disc, payload) {
  *   sendDelete: () => void,
  *   destroy: () => void,
  *   isReady: () => boolean,
+ *   pendingCount: () => Promise<number>,
  * }} SyncClient
  */
 
@@ -438,5 +439,8 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
     sendDelete,
     destroy,
     isReady: () => ready,
+    /** Unacked local ops still queued for the server. Async: it counts in
+     *  IndexedDB, so it stays correct across reloads and reconnects. */
+    pendingCount: () => pendingCountOp(docId),
   }
 }

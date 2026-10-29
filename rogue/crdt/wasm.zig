@@ -145,6 +145,15 @@ export fn rogue_reserve(nodes: u32) i32 {
     return 1;
 }
 
+/// Bytes the CRDT arena currently holds. The arena never frees individually, so
+/// this is the document's real footprint (its ops + index) rather than a
+/// reservation: it excludes the static in/out buffers and any WASM pages the
+/// allocator hasn't asked for. Surfaced to JS as node.stats().crdtBytes — do
+/// NOT substitute memory.buffer.byteLength, which over-reports by ~25MB.
+export fn rogue_used_bytes() u32 {
+    return @intCast(arena.queryCapacity());
+}
+
 /// Toggle WASM-side console logging (undo cursor, getOp, etc.). Wired to the
 /// same ?debug=sync flag as the JS-side sync logs.
 export fn rogue_set_debug_logging(on: i32) void {
