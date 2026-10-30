@@ -7,6 +7,7 @@
  *   serializeNode: import('./dom_rope.js').SerializeNode,
  *   omitNode: import('./dom_rope.js').OmitNode,
  *   unwrapNode: import('./dom_rope.js').UnwrapNode,
+ *   opaqueNode?: import('./dom_rope.js').OpaqueNode,
  *   setMode: (mode: 'design' | 'readonly') => void,
  *   getCollapsedSelection: () => { node: Node, offset: number } | null,
  *   getSelectionRange: () => import('./comments.js').DomRange | null,
@@ -49,7 +50,7 @@
  * @param {EditorSessionOptions} options
  * @returns {Promise<{ node: import('./sync.js').RogueNode, comments: import('./comments.js').Comments | null, suggestions: import('./suggestions.js').Suggestions | null, deleteDoc: () => void, pendingCount: () => Promise<number> }>}
  */
-export function createEditorSession({ element, doc, win, serializeNode, omitNode, unwrapNode, setMode, getCollapsedSelection, getSelectionRange, onClick, paste, wsUrl, docId, getToken, isNewDoc, readOnly, onStatus, onProgress, onReady, onCommit, onOpTooLarge, onDocTooLarge, onSyncStart, sizeWarn, onSizeWarning, onError, onDocDeleted, comments: commentsOpt, suggestions: suggestionsOpt, }: EditorSessionOptions): Promise<{
+export function createEditorSession({ element, doc, win, serializeNode, omitNode, unwrapNode, opaqueNode, setMode, getCollapsedSelection, getSelectionRange, onClick, paste, wsUrl, docId, getToken, isNewDoc, readOnly, onStatus, onProgress, onReady, onCommit, onOpTooLarge, onDocTooLarge, onSyncStart, sizeWarn, onSizeWarning, onError, onDocDeleted, comments: commentsOpt, suggestions: suggestionsOpt, }: EditorSessionOptions): Promise<{
     node: import("./sync.js").RogueNode;
     comments: import("./comments.js").Comments | null;
     suggestions: import("./suggestions.js").Suggestions | null;
@@ -66,6 +67,7 @@ export type EditorSurface = {
     serializeNode: import("./dom_rope.js").SerializeNode;
     omitNode: import("./dom_rope.js").OmitNode;
     unwrapNode: import("./dom_rope.js").UnwrapNode;
+    opaqueNode?: import("./dom_rope.js").OpaqueNode;
     setMode: (mode: "design" | "readonly") => void;
     getCollapsedSelection: () => {
         node: Node;

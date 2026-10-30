@@ -96,6 +96,17 @@ export function nodeSpan(rope: NonNullable<ReturnType<typeof buildRope>>, node: 
  *   predicate for wrappers to traverse transparently — their children are kept,
  *   the wrapper's own open/close tags are dropped (e.g. TinyMCE's format-caret
  *   bookmarks, which wrap real content).
+ * @property {import('./dom_rope.js').OpaqueNode} [opaqueNode] Host predicate for
+ *   elements to treat as opaque: the element's tags + attributes sync, but its
+ *   children never enter the CRDT (the doc stores an empty shell). For embeds,
+ *   widget shells, and notebook cells whose internals are local or synced
+ *   separately. Precedence: `omitNode` → `unwrapNode` → `opaqueNode`.
+ *
+ *   The host owns the dropped subtree: it must re-mount it after every render
+ *   (the engine rewrites the DOM from the CRDT), the element should be
+ *   `contenteditable="false"` so the caret can't descend into unindexed content,
+ *   and undo/snapshots do not cover it. Mutating it emits no ops; mutating its
+ *   attributes does.
  * @property {(html: string, context?: Element) => boolean} [validateHtml]
  *   The HTML round-trip predicate used to validate ops. Defaults to the native
  *   `validHtml` (clone the context tag + `innerHTML` round-trip). The headless
@@ -140,7 +151,7 @@ export function nodeSpan(rope: NonNullable<ReturnType<typeof buildRope>>, node: 
  * @param {RogueNodeOptions} options
  * @returns {Promise<RogueNode>}
  */
-export function createRogueNode({ element: editorRoot, replicaId, onCommit, maxOpBytes, onOpTooLarge, onDocTooLarge, sizeWarn, onSizeWarning, onError, onChange, paste, doc, win, serializeNode, omitNode, unwrapNode, validateHtml, }: RogueNodeOptions): Promise<RogueNode>;
+export function createRogueNode({ element: editorRoot, replicaId, onCommit, maxOpBytes, onOpTooLarge, onDocTooLarge, sizeWarn, onSizeWarning, onError, onChange, paste, doc, win, serializeNode, omitNode, unwrapNode, opaqueNode, validateHtml, }: RogueNodeOptions): Promise<RogueNode>;
 export type RogueNodeOptions = {
     /**
      * The container the engine renders into and
@@ -252,6 +263,20 @@ export type RogueNodeOptions = {
      * bookmarks, which wrap real content).
      */
     unwrapNode?: import("./dom_rope.js").UnwrapNode | undefined;
+    /**
+     * Host predicate for
+     * elements to treat as opaque: the element's tags + attributes sync, but its
+     * children never enter the CRDT (the doc stores an empty shell). For embeds,
+     * widget shells, and notebook cells whose internals are local or synced
+     * separately. Precedence: `omitNode` → `unwrapNode` → `opaqueNode`.
+     *
+     * The host owns the dropped subtree: it must re-mount it after every render
+     * (the engine rewrites the DOM from the CRDT), the element should be
+     * `contenteditable="false"` so the caret can't descend into unindexed content,
+     * and undo/snapshots do not cover it. Mutating it emits no ops; mutating its
+     * attributes does.
+     */
+    opaqueNode?: import("./dom_rope.js").OpaqueNode | undefined;
     /**
      * The HTML round-trip predicate used to validate ops. Defaults to the native
      * `validHtml` (clone the context tag + `innerHTML` round-trip). The headless

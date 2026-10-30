@@ -6,7 +6,7 @@ export { createRogueNode } from './types/sync.js'
 export type { NodeStats, RogueNode, RogueNodeOptions } from './types/sync.js'
 
 export { DomRope, buildRope } from './types/dom_rope.js'
-export type { SerializeNode, OmitNode, UnwrapNode } from './types/dom_rope.js'
+export type { SerializeNode, OmitNode, UnwrapNode, OpaqueNode } from './types/dom_rope.js'
 
 export { createComments, resolveAnchor, anchorForRange } from './types/comments.js'
 export type { Comments, CommentsOptions, ResolvedThread, DomRange, Comment, Reply, CommentsFetcher } from './types/comments.js'

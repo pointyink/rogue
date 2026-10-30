@@ -5,9 +5,12 @@ import wasmBase64 from "./rogue.wasm.js";
 import { CrdtErrorKind, parseCrdtError } from "./crdt_error.js";
 import {
   buildRope,
+  getOpenTag,
+  getCloseTag,
   defaultSerializeNode,
   defaultOmitNode,
   defaultUnwrapNode,
+  defaultOpaqueNode,
   escapeText,
 } from "./dom_rope.js";
 
@@ -146,6 +149,17 @@ export function nodeSpan(rope, node) {
  *   predicate for wrappers to traverse transparently — their children are kept,
  *   the wrapper's own open/close tags are dropped (e.g. TinyMCE's format-caret
  *   bookmarks, which wrap real content).
+ * @property {import('./dom_rope.js').OpaqueNode} [opaqueNode] Host predicate for
+ *   elements to treat as opaque: the element's tags + attributes sync, but its
+ *   children never enter the CRDT (the doc stores an empty shell). For embeds,
+ *   widget shells, and notebook cells whose internals are local or synced
+ *   separately. Precedence: `omitNode` → `unwrapNode` → `opaqueNode`.
+ *
+ *   The host owns the dropped subtree: it must re-mount it after every render
+ *   (the engine rewrites the DOM from the CRDT), the element should be
+ *   `contenteditable="false"` so the caret can't descend into unindexed content,
+ *   and undo/snapshots do not cover it. Mutating it emits no ops; mutating its
+ *   attributes does.
  * @property {(html: string, context?: Element) => boolean} [validateHtml]
  *   The HTML round-trip predicate used to validate ops. Defaults to the native
  *   `validHtml` (clone the context tag + `innerHTML` round-trip). The headless
@@ -210,6 +224,7 @@ export async function createRogueNode({
   serializeNode = defaultSerializeNode,
   omitNode = defaultOmitNode,
   unwrapNode = defaultUnwrapNode,
+  opaqueNode = defaultOpaqueNode,
   validateHtml = validHtml,
 }) {
   const wasmBytes = Uint8Array.from(atob(wasmBase64), (c) => c.charCodeAt(0));
@@ -276,7 +291,7 @@ export async function createRogueNode({
 
   // The rope always exists (empty document ⇒ empty rope, never null), so no call
   // site has to null-check it. Built from the editor's current content up front.
-  let rope = buildRope(editorRoot, serializeNode, omitNode, unwrapNode);
+  let rope = buildRope(editorRoot, serializeNode, omitNode, unwrapNode, opaqueNode);
 
   /** Full rebuild: re-derive the whole rope from editorRoot's live children. */
   function rebuildRope() {
@@ -729,6 +744,34 @@ export async function createRogueNode({
     // the diff (both the char and the HTML-offset math). Elements go through the host
     // serializeNode hook (deep clone — the hook may mutate it, e.g. strip internal
     // attrs / drop nested bogus nodes); browser .outerHTML already escapes their text.
+    /** Does `root`'s subtree contain an opaque element? O(k), and only the
+     *  element tree — no serialization. */
+    const containsOpaque = (/** @type {Element} */ root) => {
+      for (let el = root.firstElementChild; el; el = el.nextElementSibling) {
+        if (opaqueNode(el) || containsOpaque(el)) return true;
+      }
+      return false;
+    };
+    /** Hook-consistent serialization, mirroring toRopeNodes. Used only when an
+     *  opaque node is in play: a deep clone would carry its local children into
+     *  the diff, which then pushes them into the CRDT — the exact leak the hook
+     *  exists to prevent. */
+    const serializeDeep = (/** @type {Node} */ node) => {
+      if (omitNode(node)) return "";
+      if (node.nodeType === 3) return escapeText(/** @type {Text} */ (node).data);
+      if (node.nodeType !== 1) return "";
+      const el = /** @type {Element} */ (node);
+      if (unwrapNode(el)) {
+        let s = "";
+        for (const child of el.childNodes) s += serializeDeep(child);
+        return s;
+      }
+      const open = getOpenTag(el, serializeNode);
+      if (opaqueNode(el)) return open + getCloseTag(el);
+      let s = open;
+      for (const child of el.childNodes) s += serializeDeep(child);
+      return s + getCloseTag(el);
+    };
     const serialize = (/** @type {Node} */ node) => {
       if (omitNode(node)) return "";
       if (node.nodeType === 3) return escapeText(/** @type {Text} */ (node).data);
@@ -738,7 +781,14 @@ export async function createRogueNode({
           for (const child of node.childNodes) s += serialize(child);
           return s;
         }
-        return serializeNode(/** @type {Element} */ (node.cloneNode(true)));
+        const el = /** @type {Element} */ (node);
+        // Opaque: the shell only.
+        if (opaqueNode(el)) return serializeNode(/** @type {Element} */ (el.cloneNode(false)));
+        // Fast path unchanged unless an opaque descendant forces the walk. Skip
+        // the scan entirely when the host didn't opt in (the TinyMCE/HugeRTE
+        // hot path stays byte-identical).
+        if (opaqueNode !== defaultOpaqueNode && containsOpaque(el)) return serializeDeep(el);
+        return serializeNode(/** @type {Element} */ (el.cloneNode(true)));
       }
       return "";
     };
@@ -1347,7 +1397,7 @@ export async function createRogueNode({
    * @returns {string}
    */
   function cleanInnerHtml() {
-    const r = buildRope(editorRoot, serializeNode, omitNode, unwrapNode);
+    const r = buildRope(editorRoot, serializeNode, omitNode, unwrapNode, opaqueNode);
     return r ? r.serialize() : "";
   }
 
@@ -1559,6 +1609,22 @@ export async function createRogueNode({
   }
 
   /**
+   * A mutation wholly inside an opaque element is the host's local business: the
+   * rope tracks only the shell, so there is nothing to diff and nothing to
+   * commit. Resolving a region there would also throw — the parent was never
+   * tokenized. Attribute changes on the shell *itself* do sync, so those are not
+   * filtered.
+   * @param {MutationRecord} rec
+   */
+  function opaqueLocalMutation(rec) {
+    const from = rec.type === "attributes" ? rec.target.parentNode : rec.target;
+    for (let n = from; n && n !== editorRoot; n = n.parentNode) {
+      if (n.nodeType === 1 /* ELEMENT_NODE */ && opaqueNode(/** @type {Element} */ (n))) return true;
+    }
+    return false;
+  }
+
+  /**
    * The local path's top level (symmetric with applyOp): the observer's batch of
    * MutationRecords → the touched region → a scoped CRDT diff. The records
    * authoritatively bound the DOM change, so a resolved region is the whole story —
@@ -1576,10 +1642,14 @@ export async function createRogueNode({
     // observer while loading; ops arrive via mergeOp, not the DOM.
     if (loading) return;
     if (composing) return;
+    // Drop mutations inside opaque subtrees (they can't affect the CRDT). If
+    // that was the whole batch, there is nothing left to sync.
+    const relevant = records.filter((r) => !opaqueLocalMutation(r));
+    if (relevant.length === 0) return;
     // Debug/bisect knob: force the whole-document diff path (skip scoped region
     // resolution) to isolate whether a divergence lives in the surgical local
     // diff or deeper. See __rogueForceFullSync at the createRogueNode top.
-    const region = forceFullSync() ? null : localRegion(records);
+    const region = forceFullSync() ? null : localRegion(relevant);
     if (debugSync) {
       // Raw mutations + the region they resolved to. On a clean→diverged transition,
       // this shows whether a chrome removal (a) never appeared as a record (lost),
@@ -1588,7 +1658,7 @@ export async function createRogueNode({
       console.log(
         "%c[mut]",
         "color:#a5f;font-weight:bold",
-        records.map((r) =>
+        relevant.map((r) =>
           r.type === "childList"
             ? `childList @${describeNode(r.target)} +[${[...r.addedNodes].map(describeNode).join(", ")}] −[${[...r.removedNodes].map(describeNode).join(", ")}]`
             : `${r.type} @${describeNode(r.target)}${r.attributeName ? ` (${r.attributeName})` : ""}`,

@@ -16,7 +16,7 @@ import { createRogueNode } from './sync.js'
 
 /** HTML elements whose innerHTML content is raw text (not markup). */
 const RAW_TEXT = new Set(['script', 'style', 'noscript'])
-import { buildRope, defaultSerializeNode, defaultOmitNode, defaultUnwrapNode } from './dom_rope.js'
+import { buildRope, defaultSerializeNode, defaultOmitNode, defaultUnwrapNode, defaultOpaqueNode } from './dom_rope.js'
 
 /** Let the engine's MutationObserver deliver + process pending mutations. */
 const flush = () => new Promise((r) => setTimeout(r, 0))
@@ -26,12 +26,16 @@ const flush = () => new Promise((r) => setTimeout(r, 0))
  * scrub + escape the CRDT render uses). Reports whether it round-trips un-mangled
  * and what it normalizes to.
  * @param {string} html @param {Document} doc
+ * @param {import('./dom_rope.js').OpaqueNode} [opaqueNode] An opaque element's
+ *   children are dropped before they reach the CRDT, so they must be dropped
+ *   from the round-trip too — otherwise a widget's local markup (a table that
+ *   normalizes to <tbody>, say) rejects a write that would have stored cleanly.
  * @returns {{ ok: boolean, cleaned: string }}
  */
-export function roundTripHtml(html, doc) {
+export function roundTripHtml(html, doc, opaqueNode = defaultOpaqueNode) {
   const tmp = doc.createElement('div')
   tmp.innerHTML = html
-  const rope = buildRope(tmp, defaultSerializeNode, defaultOmitNode, defaultUnwrapNode)
+  const rope = buildRope(tmp, defaultSerializeNode, defaultOmitNode, defaultUnwrapNode, opaqueNode)
   const cleaned = rope ? rope.serialize() : ''
   return { ok: cleaned === html, cleaned }
 }
@@ -86,10 +90,10 @@ export function parse5ValidHtml(html, context) {
  * Pass `doc`/`win`/`element` to bind an existing jsdom (e.g. the MCP server owns
  * the jsdom + sync client); otherwise a fresh jsdom is created.
  *
- * @param {{ replicaId?: number, onCommit?: (payload: Uint8Array) => void, doc?: Document, win?: Window, element?: HTMLElement }} [options]
+ * @param {{ replicaId?: number, onCommit?: (payload: Uint8Array) => void, doc?: Document, win?: Window, element?: HTMLElement, opaqueNode?: import('./dom_rope.js').OpaqueNode }} [options]
  * @returns {Promise<HeadlessEditor>}
  */
-export async function createHeadlessEditor({ replicaId, onCommit, doc, win, element } = {}) {
+export async function createHeadlessEditor({ replicaId, onCommit, doc, win, element, opaqueNode } = {}) {
   if (!doc || !win || !element) {
     const dom = new JSDOM('<!doctype html><html><body></body></html>')
     doc = dom.window.document
@@ -110,6 +114,7 @@ export async function createHeadlessEditor({ replicaId, onCommit, doc, win, elem
     win,
     replicaId,
     validateHtml: parse5ValidHtml,
+    opaqueNode,
     paste: false, // the sidecar owns insert validation; skip the engine's execCommand paste path
     onCommit: (payload) => {
       for (const cb of subscribers) cb(payload)
@@ -118,14 +123,14 @@ export async function createHeadlessEditor({ replicaId, onCommit, doc, win, elem
 
   const debug = /** @type {any} */ (win).rogue
 
-  return makeEditorApi({ node, doc, element, debug, subscribers })
+  return makeEditorApi({ node, doc, element, debug, subscribers, opaqueNode })
 }
 
 /**
  * The tool surface exposed to agents.
- * @param {{ node: import('./sync.js').RogueNode, doc: Document, element: HTMLElement, debug: any, subscribers: Set<(payload: Uint8Array) => void> }} ctx
+ * @param {{ node: import('./sync.js').RogueNode, doc: Document, element: HTMLElement, debug: any, subscribers: Set<(payload: Uint8Array) => void>, opaqueNode?: import('./dom_rope.js').OpaqueNode }} ctx
  */
-function makeEditorApi({ node, doc, element, debug, subscribers }) {
+function makeEditorApi({ node, doc, element, debug, subscribers, opaqueNode = defaultOpaqueNode }) {
   return {
     /** The raw engine node (beginLoad/endLoad, setSyncDebug, ...). */
     node,
@@ -142,11 +147,11 @@ function makeEditorApi({ node, doc, element, debug, subscribers }) {
     getVisLen: () => debug.visLen(),
 
     /** Pre-check `html` without committing: does it round-trip un-mangled? */
-    validate: (/** @type {string} */ html) => roundTripHtml(html, doc),
+    validate: (/** @type {string} */ html) => roundTripHtml(html, doc, opaqueNode),
 
     /** Replace the whole document with validated HTML. */
     async setHtml(/** @type {string} */ html) {
-      const { ok, cleaned } = roundTripHtml(html, doc)
+      const { ok, cleaned } = roundTripHtml(html, doc, opaqueNode)
       if (!ok) return { ok: false, cleaned }
       node.markUserEdit()
       element.innerHTML = cleaned
@@ -156,7 +161,7 @@ function makeEditorApi({ node, doc, element, debug, subscribers }) {
 
     /** Append a validated HTML fragment to the end of the document. */
     async appendHtml(/** @type {string} */ html) {
-      const { ok, cleaned } = roundTripHtml(html, doc)
+      const { ok, cleaned } = roundTripHtml(html, doc, opaqueNode)
       if (!ok) return { ok: false, cleaned }
       node.markUserEdit()
       const tmp = doc.createElement('div')
@@ -184,7 +189,7 @@ function makeEditorApi({ node, doc, element, debug, subscribers }) {
     /** Three-way consistency: CRDT render ≡ fresh DOM rope serialization. */
     assertConsistent() {
       const crdt = debug.render()
-      const fresh = buildRope(element, defaultSerializeNode, defaultOmitNode, defaultUnwrapNode)
+      const fresh = buildRope(element, defaultSerializeNode, defaultOmitNode, defaultUnwrapNode, opaqueNode)
       const dom = fresh ? fresh.serialize() : ''
       return { ok: crdt === dom, crdt, dom }
     },

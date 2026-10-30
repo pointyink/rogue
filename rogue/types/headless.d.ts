@@ -3,9 +3,13 @@
  * scrub + escape the CRDT render uses). Reports whether it round-trips un-mangled
  * and what it normalizes to.
  * @param {string} html @param {Document} doc
+ * @param {import('./dom_rope.js').OpaqueNode} [opaqueNode] An opaque element's
+ *   children are dropped before they reach the CRDT, so they must be dropped
+ *   from the round-trip too — otherwise a widget's local markup (a table that
+ *   normalizes to <tbody>, say) rejects a write that would have stored cleanly.
  * @returns {{ ok: boolean, cleaned: string }}
  */
-export function roundTripHtml(html: string, doc: Document): {
+export function roundTripHtml(html: string, doc: Document, opaqueNode?: import("./dom_rope.js").OpaqueNode): {
     ok: boolean;
     cleaned: string;
 };
@@ -26,15 +30,16 @@ export function parse5ValidHtml(html: string, context?: Element): boolean;
  * Pass `doc`/`win`/`element` to bind an existing jsdom (e.g. the MCP server owns
  * the jsdom + sync client); otherwise a fresh jsdom is created.
  *
- * @param {{ replicaId?: number, onCommit?: (payload: Uint8Array) => void, doc?: Document, win?: Window, element?: HTMLElement }} [options]
+ * @param {{ replicaId?: number, onCommit?: (payload: Uint8Array) => void, doc?: Document, win?: Window, element?: HTMLElement, opaqueNode?: import('./dom_rope.js').OpaqueNode }} [options]
  * @returns {Promise<HeadlessEditor>}
  */
-export function createHeadlessEditor({ replicaId, onCommit, doc, win, element }?: {
+export function createHeadlessEditor({ replicaId, onCommit, doc, win, element, opaqueNode }?: {
     replicaId?: number;
     onCommit?: (payload: Uint8Array) => void;
     doc?: Document;
     win?: Window;
     element?: HTMLElement;
+    opaqueNode?: import("./dom_rope.js").OpaqueNode;
 }): Promise<HeadlessEditor>;
 export type HeadlessEditor = {
     node: import("./sync.js").RogueNode;
