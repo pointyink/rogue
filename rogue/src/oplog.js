@@ -84,6 +84,23 @@ export async function clearDoc(docId) {
 }
 
 /**
+ * Count the doc's unacked ops without materializing them. Cheaper than
+ * `pendingFor(docId).length` for a recovery panel polling "N ops not sent".
+ * @param {string} docId
+ * @returns {Promise<number>}
+ */
+export async function pendingCount(docId) {
+  const db = await openDB()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readonly')
+    const range = IDBKeyRange.bound([docId], [docId, []])
+    const req = tx.objectStore(STORE).count(range)
+    req.onsuccess = () => resolve(req.result)
+    req.onerror = () => reject(req.error)
+  })
+}
+
+/**
  * Return all unacked ops for a doc, oldest first.
  * Uses a range query on the compound key prefix — `[]` upper bound sorts
  * above any primitive, so this matches every `[docId, *]` entry.

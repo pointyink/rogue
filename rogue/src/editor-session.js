@@ -48,6 +48,9 @@ import { createDocBus } from './doc-bus.js'
  *   onCommit?: (payload: Uint8Array) => void,
  *   onOpTooLarge?: (bytes: number, limit: number) => void,
  *   onDocTooLarge?: () => void,
+ *   onSyncStart?: (bytes: number) => void,
+ *   sizeWarn?: { ops?: number, opBytes?: number, crdtBytes?: number },
+ *   onSizeWarning?: (stats: import('./sync.js').NodeStats, key: 'ops' | 'opBytes' | 'crdtBytes') => void,
  *   onError?: (error: import('./crdt_error.js').CrdtError) => void,
  *   onDocDeleted?: (docId: string) => void,
  *   comments?: {
@@ -66,7 +69,7 @@ import { createDocBus } from './doc-bus.js'
  * engine node and (if enabled) the comments/suggestions APIs.
  *
  * @param {EditorSessionOptions} options
- * @returns {Promise<{ node: import('./sync.js').RogueNode, comments: import('./comments.js').Comments | null, suggestions: import('./suggestions.js').Suggestions | null, deleteDoc: () => void }>}
+ * @returns {Promise<{ node: import('./sync.js').RogueNode, comments: import('./comments.js').Comments | null, suggestions: import('./suggestions.js').Suggestions | null, deleteDoc: () => void, pendingCount: () => Promise<number> }>}
  */
 export async function createEditorSession({
   element,
@@ -91,6 +94,9 @@ export async function createEditorSession({
   onCommit,
   onOpTooLarge,
   onDocTooLarge,
+  onSyncStart,
+  sizeWarn,
+  onSizeWarning,
   onError,
   onDocDeleted,
   comments: commentsOpt,
@@ -135,6 +141,8 @@ export async function createEditorSession({
     paste,
     onOpTooLarge,
     onDocTooLarge,
+    sizeWarn,
+    onSizeWarning,
     onError,
     // Re-resolve comment anchors after every visible-text change (local edits,
     // remote ops, undo/redo) — fires after the rope is rebuilt, so anchors map
@@ -284,7 +292,13 @@ export async function createEditorSession({
         suggestions?.load()
         onReady?.()
       },
-      onSyncStart: (bytes) => node.reserve(bytes >> 3), // ~8 bytes per node
+      // ~8 bytes per node: a rough pre-grow hint, not a size report. Hosts that
+      // want to gate a big load get the raw byte count here, before the first
+      // render.
+      onSyncStart: (bytes) => {
+        node.reserve(bytes >> 3)
+        onSyncStart?.(bytes)
+      },
       onProgress,
       onCommentChanged: () => comments?.handleRemoteChange(),
       onSuggestionChanged: () => suggestions?.handleRemoteChange(),
@@ -302,7 +316,15 @@ export async function createEditorSession({
     }
   }
 
-  return { node, comments, suggestions, deleteDoc: () => syncClient?.sendDelete() }
+  return {
+    node,
+    comments,
+    suggestions,
+    deleteDoc: () => syncClient?.sendDelete(),
+    /** Unacked local ops (0 when there is no sync client). A recovery panel
+     *  shows this as "N ops not sent" — the usual stuck-sync symptom. */
+    pendingCount: () => (syncClient ? syncClient.pendingCount() : Promise.resolve(0)),
+  }
 }
 
 /**

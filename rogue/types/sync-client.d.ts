@@ -35,4 +35,5 @@ export type SyncClient = {
     sendDelete: () => void;
     destroy: () => void;
     isReady: () => boolean;
+    pendingCount: () => Promise<number>;
 };

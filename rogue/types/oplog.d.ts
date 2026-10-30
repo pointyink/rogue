@@ -19,6 +19,13 @@ export function ackMany(docId: string, ids: string[]): Promise<void>;
  */
 export function clearDoc(docId: string): Promise<void>;
 /**
+ * Count the doc's unacked ops without materializing them. Cheaper than
+ * `pendingFor(docId).length` for a recovery panel polling "N ops not sent".
+ * @param {string} docId
+ * @returns {Promise<number>}
+ */
+export function pendingCount(docId: string): Promise<number>;
+/**
  * Return all unacked ops for a doc, oldest first.
  * Uses a range query on the compound key prefix — `[]` upper bound sorts
  * above any primitive, so this matches every `[docId, *]` entry.

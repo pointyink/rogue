@@ -105,6 +105,15 @@ export function nodeSpan(rope, node) {
  * @property {() => void} [onDocTooLarge] Called when an edit can't be applied
  *   because the document has reached its storage capacity. The edit is reverted
  *   (the CRDT is left untouched).
+ * @property {{ ops?: number, opBytes?: number, crdtBytes?: number }} [sizeWarn]
+ *   Soft size thresholds. When a configured metric crosses its threshold,
+ *   `onSizeWarning` fires — once per crossing, re-armed when the metric falls
+ *   back below half the threshold. Nothing is enforced: the edit still applies,
+ *   and the host decides what to do (banner, go read-only, offer an export).
+ *   Prefer `ops`: a legitimate large paste is one big op, whereas duplication
+ *   shows up as an op-count blow-up.
+ * @property {(stats: NodeStats, key: 'ops' | 'opBytes' | 'crdtBytes') => void} [onSizeWarning]
+ *   Called with the full stats when a `sizeWarn` threshold is first crossed.
  * @property {(error: import('./crdt_error.js').CrdtError) => void} [onError]
  *   Called when an operation fails for a reason other than the known limits
  *   above — receives the structured error the WASM wrote into its output buffer
@@ -145,6 +154,20 @@ export function nodeSpan(rope, node) {
  */
 
 /**
+ * Cheap (O(1)) size and integrity numbers for a live node. `crdtBytes` is the
+ * CRDT arena's real footprint; it does NOT include the DOM rope or the rendered
+ * DOM, which are JS heap and have no portable per-doc measure.
+ * @typedef {object} NodeStats
+ * @property {number} visLen      Visible UTF-16 code units.
+ * @property {number} ops         Applied op groups retained for the fold.
+ * @property {number} opBytes     Bytes of those retained op payloads (JS heap).
+ * @property {number} crdtBytes   Bytes the CRDT arena holds in WASM.
+ * @property {number} parked      Ops parked, waiting on a missing dependency.
+ * @property {number} parkedDropped  Ops dropped at the parked cap. Non-zero means
+ *   the CRDT is missing history — the doc should be exported and reloaded.
+ */
+
+/**
  * @typedef {{
  *   mergeOp: (payload: Uint8Array) => void,
  *   undo: () => void,
@@ -156,6 +179,10 @@ export function nodeSpan(rope, node) {
  *   setAuthor: (author: number) => void,
  *   markUserEdit: () => void,
  *   reserve: (nodes: number) => void,
+ *   stats: () => NodeStats,
+ *   getString: () => string,
+ *   exportOps: () => { gid: { replica: number, seq: number }, payload: Uint8Array }[],
+ *   assertConsistent: () => { ok: boolean, crdt: string, dom: string },
  *   crdt: import('./comments.js').CrdtSurface,
  *   rope: import('./dom_rope.js').DomRope,
  *   destroy: () => void,
@@ -173,6 +200,8 @@ export async function createRogueNode({
   maxOpBytes = 8 * 1024 * 1024,
   onOpTooLarge,
   onDocTooLarge,
+  sizeWarn,
+  onSizeWarning,
   onError,
   onChange,
   paste,
@@ -233,6 +262,7 @@ export async function createRogueNode({
     rogue_set_debug_logging,
     rogue_set_author,
     rogue_reserve,
+    rogue_used_bytes,
   } = exp;
 
   // Small initial SoA capacity — the doc grows toward max_nodes (2M) on demand,
@@ -1189,6 +1219,7 @@ export async function createRogueNode({
         const payload = readBytes();
         trackApplied(gidOf(payload), payload);
         onCommit?.(payload);
+        maybeWarnSize();
         lastChangeRange = { minIx: offset, maxIx: offset + span };
         if (userEditPending) {
           userEditPending = false;
@@ -1327,6 +1358,17 @@ export async function createRogueNode({
     return a.length === b.length ? -1 : n;
   }
 
+  /** Compare the CRDT render against the live DOM once. O(n): the public
+   *  `assertConsistent()` exposes it for a diagnose button, and the debug path
+   *  below uses it per settle.
+   *  @returns {{ ok: boolean, crdt: string, dom: string }} */
+  function checkConsistent() {
+    rogue_render();
+    const crdtStr = readUtf16();
+    const domStr = cleanInnerHtml();
+    return { ok: crdtStr === domStr, crdt: crdtStr, dom: domStr };
+  }
+
   /**
    * Divergence detector. At a sync settle point three representations must be
    * byte-identical: the CRDT render, the persistent rope's serialization, and
@@ -1340,9 +1382,7 @@ export async function createRogueNode({
   function assertConsistent(where) {
     if (!debugSync) return;
     try {
-      rogue_render();
-      const crdt = readUtf16();
-      const dom = cleanInnerHtml();
+      const { crdt, dom } = checkConsistent();
       const ropeStr = rope ? rope.serialize() : "";
       /** @type {string[]} */
       const problems = [];
@@ -1635,6 +1675,9 @@ export async function createRogueNode({
   const parkedOps = [];
   const PARKED_CAP = 10_000;
 
+  /** Ops dropped at PARKED_CAP. Non-zero means our history is known-incomplete. */
+  let parkedDropped = 0;
+
   /** @typedef {{ replica: number, seq: number }} Gid */
 
   /** The group id of a multi_op_v0 payload.
@@ -1661,6 +1704,9 @@ export async function createRogueNode({
   /** Applied groups, sorted by (seq, replica) — the fold order. */
   let appliedGroups = /** @type {{ gid: Gid, payload: Uint8Array }[]} */ ([]);
 
+  /** Total payload bytes in appliedGroups, maintained so stats() stays O(1). */
+  let appliedBytes = 0;
+
   /** Keys of appliedGroups, for O(1) idempotency. */
   const appliedKeys = new Set();
 
@@ -1673,8 +1719,25 @@ export async function createRogueNode({
     const key = gidKey(gid);
     if (appliedKeys.has(key)) return;
     appliedGroups.push({ gid, payload });
+    appliedBytes += payload.byteLength;
     appliedKeys.add(key);
     if (!maxGid || cmpGid(gid, maxGid) > 0) maxGid = gid;
+  }
+
+  /** Drop the last tracked group, keeping appliedBytes in step.
+   *  @returns {{ gid: Gid, payload: Uint8Array } | undefined} */
+  function untrackLast() {
+    const g = appliedGroups.pop();
+    if (g) appliedBytes -= g.payload.byteLength;
+    return g;
+  }
+
+  /** Drop (and return) the groups from `idx` on, keeping appliedBytes in step.
+   *  @param {number} idx */
+  function untrackFrom(idx) {
+    const removed = appliedGroups.splice(idx);
+    for (const g of removed) appliedBytes -= g.payload.byteLength;
+    return removed;
   }
 
   /** Attempt all parked ops. Returns true if any were merged.
@@ -1723,6 +1786,7 @@ export async function createRogueNode({
    *  incomplete; the right app-level response is to prompt a reload.
    *  @param {Uint8Array} payload */
   function reportParkedOverflow(payload) {
+    parkedDropped += 1;
     console.error(
       `[rogue] parked-ops cap (${PARKED_CAP}) exceeded — incoming op dropped. ` +
         `CRDT state is now incomplete; client should reload to re-sync.`,
@@ -1806,7 +1870,7 @@ export async function createRogueNode({
         crdt.revertTail(1);
         rejected.add(key);
         appliedKeys.delete(key);
-        appliedGroups.pop();
+        untrackLast();
         maxGid = prevMax;
       }
 
@@ -1834,7 +1898,7 @@ export async function createRogueNode({
       // Un-apply the tail in place, then rewind the fold bookkeeping to the head so
       // the replayed ops re-track through the normal at-head path.
       crdt.revertTail(tailCount);
-      const replay = appliedGroups.splice(idx);
+      const replay = untrackFrom(idx);
       for (const g of replay) appliedKeys.delete(gidKey(g.gid));
       maxGid = appliedGroups.length
         ? appliedGroups[appliedGroups.length - 1].gid
@@ -1864,6 +1928,8 @@ export async function createRogueNode({
       // endLoad replays a walk-back tail (a load should settle once).
       if (!booting) onChange?.(opBounds);
     }
+
+    maybeWarnSize();
   }
 
   /**
@@ -1888,7 +1954,7 @@ export async function createRogueNode({
     let dirty = null;
 
     while (appliedGroups.length > 0) {
-      const g = /** @type {{ gid: Gid, payload: Uint8Array }} */ (appliedGroups.pop());
+      const g = /** @type {{ gid: Gid, payload: Uint8Array }} */ (untrackLast());
       const reverted = crdt.revertTail(1);
       appliedKeys.delete(gidKey(g.gid));
       popped.push(g);
@@ -1939,6 +2005,65 @@ export async function createRogueNode({
     }
   }
 
+  // ── Observability ─────────────────────────────────────────────────────────
+  // Cheap values for a host to poll (a status bar, a recovery panel, a warning
+  // banner). Nothing here mutates the doc; destructive repair belongs server-side.
+
+  /** @type {Record<string, boolean>} */
+  const warnArmed = {};
+
+  /** O(1) size/integrity snapshot. @returns {NodeStats} */
+  function stats() {
+    return {
+      visLen: crdt.visLen(),
+      ops: appliedGroups.length,
+      opBytes: appliedBytes,
+      crdtBytes: rogue_used_bytes(),
+      parked: parkedOps.length,
+      parkedDropped,
+    };
+  }
+
+  /** Fire onSizeWarning when a sizeWarn metric first crosses its threshold;
+   *  re-arm once it falls back below half, so undo/delete doesn't re-fire on
+   *  every subsequent op. O(1) per applied op — no counters to scan. */
+  function maybeWarnSize() {
+    if (!sizeWarn) return;
+    /** @type {NodeStats | null} */
+    let snapshot = null;
+    for (const key of /** @type {const} */ (["ops", "opBytes", "crdtBytes"])) {
+      const limit = sizeWarn[key];
+      if (!limit) continue;
+      snapshot ??= stats();
+      if (snapshot[key] >= limit) {
+        if (!warnArmed[key]) {
+          warnArmed[key] = true;
+          onSizeWarning?.(snapshot, key);
+        }
+      } else if (snapshot[key] < limit * 0.5) {
+        warnArmed[key] = false;
+      }
+    }
+  }
+
+  /** The document's current value as a string. The CRDT is markup-agnostic —
+   *  HTML is only a host convention (svg-edit stores raw SVG through the same
+   *  node) — hence getString(), not getHtml(). O(n): it renders the whole doc. */
+  function getString() {
+    return crdt.render() ?? "";
+  }
+
+  /** Every applied op payload, in application order, for diagnosis/export.
+   *  The payloads are the live multi_op_v0 buffers — read-only, do not mutate.
+   *  O(n). Client-side deletion is deliberately not offered: removing history
+   *  has to happen where the other replicas agree with it (the server). */
+  function exportOps() {
+    return appliedGroups.map(({ gid, payload }) => ({
+      gid: { replica: gid.replica, seq: gid.seq },
+      payload,
+    }));
+  }
+
   return {
     mergeOp(payload) {
       // Defer remote ops while the IME owns the DOM; applying now would
@@ -1981,6 +2106,18 @@ export async function createRogueNode({
     reserve(/** @type {number} */ nodes) {
       if (nodes > 0) rogue_reserve(nodes);
     },
+
+    /** O(1) size/integrity numbers (see NodeStats). Cheap enough to poll. */
+    stats,
+
+    /** The document's current value as a string. O(n). */
+    getString,
+
+    /** Applied op payloads, in application order, for diagnosis/export. O(n). */
+    exportOps,
+
+    /** Compare the CRDT render against the live DOM on demand. O(n). */
+    assertConsistent: checkConsistent,
 
     /** Switch the stamping identity for subsequent local ops. Lets one node emit
      *  ops under several replica ids — e.g. a shared server-side replica serving

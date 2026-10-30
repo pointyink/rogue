@@ -55,6 +55,15 @@ export function nodeSpan(rope: NonNullable<ReturnType<typeof buildRope>>, node: 
  * @property {() => void} [onDocTooLarge] Called when an edit can't be applied
  *   because the document has reached its storage capacity. The edit is reverted
  *   (the CRDT is left untouched).
+ * @property {{ ops?: number, opBytes?: number, crdtBytes?: number }} [sizeWarn]
+ *   Soft size thresholds. When a configured metric crosses its threshold,
+ *   `onSizeWarning` fires — once per crossing, re-armed when the metric falls
+ *   back below half the threshold. Nothing is enforced: the edit still applies,
+ *   and the host decides what to do (banner, go read-only, offer an export).
+ *   Prefer `ops`: a legitimate large paste is one big op, whereas duplication
+ *   shows up as an op-count blow-up.
+ * @property {(stats: NodeStats, key: 'ops' | 'opBytes' | 'crdtBytes') => void} [onSizeWarning]
+ *   Called with the full stats when a `sizeWarn` threshold is first crossed.
  * @property {(error: import('./crdt_error.js').CrdtError) => void} [onError]
  *   Called when an operation fails for a reason other than the known limits
  *   above — receives the structured error the WASM wrote into its output buffer
@@ -94,6 +103,19 @@ export function nodeSpan(rope: NonNullable<ReturnType<typeof buildRope>>, node: 
  *   fixed-point semantics, ~7× faster because it skips DOM construction.
  */
 /**
+ * Cheap (O(1)) size and integrity numbers for a live node. `crdtBytes` is the
+ * CRDT arena's real footprint; it does NOT include the DOM rope or the rendered
+ * DOM, which are JS heap and have no portable per-doc measure.
+ * @typedef {object} NodeStats
+ * @property {number} visLen      Visible UTF-16 code units.
+ * @property {number} ops         Applied op groups retained for the fold.
+ * @property {number} opBytes     Bytes of those retained op payloads (JS heap).
+ * @property {number} crdtBytes   Bytes the CRDT arena holds in WASM.
+ * @property {number} parked      Ops parked, waiting on a missing dependency.
+ * @property {number} parkedDropped  Ops dropped at the parked cap. Non-zero means
+ *   the CRDT is missing history — the doc should be exported and reloaded.
+ */
+/**
  * @typedef {{
  *   mergeOp: (payload: Uint8Array) => void,
  *   undo: () => void,
@@ -105,6 +127,10 @@ export function nodeSpan(rope: NonNullable<ReturnType<typeof buildRope>>, node: 
  *   setAuthor: (author: number) => void,
  *   markUserEdit: () => void,
  *   reserve: (nodes: number) => void,
+ *   stats: () => NodeStats,
+ *   getString: () => string,
+ *   exportOps: () => { gid: { replica: number, seq: number }, payload: Uint8Array }[],
+ *   assertConsistent: () => { ok: boolean, crdt: string, dom: string },
  *   crdt: import('./comments.js').CrdtSurface,
  *   rope: import('./dom_rope.js').DomRope,
  *   destroy: () => void,
@@ -114,7 +140,7 @@ export function nodeSpan(rope: NonNullable<ReturnType<typeof buildRope>>, node: 
  * @param {RogueNodeOptions} options
  * @returns {Promise<RogueNode>}
  */
-export function createRogueNode({ element: editorRoot, replicaId, onCommit, maxOpBytes, onOpTooLarge, onDocTooLarge, onError, onChange, paste, doc, win, serializeNode, omitNode, unwrapNode, validateHtml, }: RogueNodeOptions): Promise<RogueNode>;
+export function createRogueNode({ element: editorRoot, replicaId, onCommit, maxOpBytes, onOpTooLarge, onDocTooLarge, sizeWarn, onSizeWarning, onError, onChange, paste, doc, win, serializeNode, omitNode, unwrapNode, validateHtml, }: RogueNodeOptions): Promise<RogueNode>;
 export type RogueNodeOptions = {
     /**
      * The container the engine renders into and
@@ -153,6 +179,23 @@ export type RogueNodeOptions = {
      * (the CRDT is left untouched).
      */
     onDocTooLarge?: (() => void) | undefined;
+    /**
+     * Soft size thresholds. When a configured metric crosses its threshold,
+     * `onSizeWarning` fires — once per crossing, re-armed when the metric falls
+     * back below half the threshold. Nothing is enforced: the edit still applies,
+     * and the host decides what to do (banner, go read-only, offer an export).
+     * Prefer `ops`: a legitimate large paste is one big op, whereas duplication
+     * shows up as an op-count blow-up.
+     */
+    sizeWarn?: {
+        ops?: number;
+        opBytes?: number;
+        crdtBytes?: number;
+    } | undefined;
+    /**
+     * Called with the full stats when a `sizeWarn` threshold is first crossed.
+     */
+    onSizeWarning?: ((stats: NodeStats, key: "ops" | "opBytes" | "crdtBytes") => void) | undefined;
     /**
      * Called when an operation fails for a reason other than the known limits
      * above — receives the structured error the WASM wrote into its output buffer
@@ -217,6 +260,38 @@ export type RogueNodeOptions = {
      */
     validateHtml?: ((html: string, context?: Element) => boolean) | undefined;
 };
+/**
+ * Cheap (O(1)) size and integrity numbers for a live node. `crdtBytes` is the
+ * CRDT arena's real footprint; it does NOT include the DOM rope or the rendered
+ * DOM, which are JS heap and have no portable per-doc measure.
+ */
+export type NodeStats = {
+    /**
+     * Visible UTF-16 code units.
+     */
+    visLen: number;
+    /**
+     * Applied op groups retained for the fold.
+     */
+    ops: number;
+    /**
+     * Bytes of those retained op payloads (JS heap).
+     */
+    opBytes: number;
+    /**
+     * Bytes the CRDT arena holds in WASM.
+     */
+    crdtBytes: number;
+    /**
+     * Ops parked, waiting on a missing dependency.
+     */
+    parked: number;
+    /**
+     * Ops dropped at the parked cap. Non-zero means
+     * the CRDT is missing history — the doc should be exported and reloaded.
+     */
+    parkedDropped: number;
+};
 export type RogueNode = {
     mergeOp: (payload: Uint8Array) => void;
     undo: () => void;
@@ -228,6 +303,20 @@ export type RogueNode = {
     setAuthor: (author: number) => void;
     markUserEdit: () => void;
     reserve: (nodes: number) => void;
+    stats: () => NodeStats;
+    getString: () => string;
+    exportOps: () => {
+        gid: {
+            replica: number;
+            seq: number;
+        };
+        payload: Uint8Array;
+    }[];
+    assertConsistent: () => {
+        ok: boolean;
+        crdt: string;
+        dom: string;
+    };
     crdt: import("./comments.js").CrdtSurface;
     rope: import("./dom_rope.js").DomRope;
     destroy: () => void;

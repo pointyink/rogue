@@ -3,7 +3,7 @@
 // source JSDoc via `make build-types` into ./types/.
 
 export { createRogueNode } from './types/sync.js'
-export type { RogueNode, RogueNodeOptions } from './types/sync.js'
+export type { NodeStats, RogueNode, RogueNodeOptions } from './types/sync.js'
 
 export { DomRope, buildRope } from './types/dom_rope.js'
 export type { SerializeNode, OmitNode, UnwrapNode } from './types/dom_rope.js'
