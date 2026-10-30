@@ -118,6 +118,12 @@ export const defaultUnwrapNode = () => false
  * element should be `contenteditable="false"` so selection can't descend into
  * content the rope doesn't index, and its state is not covered by undo/snapshots.
  *
+ * Cursor restore resolves an index at the shell's end to the shell's close-tag
+ * position, i.e. *inside* the element when it holds local children. With
+ * `contenteditable="false"` the browser clamps the caret to the shell's edge, so
+ * this only bites a host that leaves the shell editable: keystrokes there are
+ * outside the index and are dropped by the opaque filter on the next render.
+ *
  * Combining this with a *deep*-cleaning `serializeNode` changes what that hook
  * sees: the non-opaque path hands it one deep clone per region, while opaque
  * subtrees are serialized element-by-element (shallow clones). A host that scrubs
