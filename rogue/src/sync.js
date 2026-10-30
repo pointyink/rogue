@@ -784,8 +784,10 @@ export async function createRogueNode({
         const el = /** @type {Element} */ (node);
         // Opaque: the shell only.
         if (opaqueNode(el)) return serializeNode(/** @type {Element} */ (el.cloneNode(false)));
-        // Fast path unchanged unless an opaque descendant forces the walk.
-        if (containsOpaque(el)) return serializeDeep(el);
+        // Fast path unchanged unless an opaque descendant forces the walk. Skip
+        // the scan entirely when the host didn't opt in (the TinyMCE/HugeRTE
+        // hot path stays byte-identical).
+        if (opaqueNode !== defaultOpaqueNode && containsOpaque(el)) return serializeDeep(el);
         return serializeNode(/** @type {Element} */ (el.cloneNode(true)));
       }
       return "";

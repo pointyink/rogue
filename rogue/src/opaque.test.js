@@ -154,12 +154,102 @@ describe('opaqueNode: headless parity', () => {
   it('setHtml keeps the shell, getHtml reports it', async () => {
     const ed = await createHeadlessEditor({ replicaId: 9, opaqueNode: isCell })
 
-    const res = await ed.setHtml('<div data-cell="h"><span>local</span></div><p>tail</p>')
+    // The shell is the canonical form: children are not document content.
+    const res = await ed.setHtml('<div data-cell="h"></div><p>tail</p>')
     expect(res.ok).toBe(true)
     expect(res.html).toBe('<div data-cell="h"></div><p>tail</p>')
     expect(ed.getHtml()).toBe('<div data-cell="h"></div><p>tail</p>')
 
-    const appended = await ed.appendHtml('<div data-cell="i"><b>local2</b></div>')
+    const appended = await ed.appendHtml('<div data-cell="i"></div>')
     expect(appended.html).toBe('<div data-cell="h"></div><p>tail</p><div data-cell="i"></div>')
+  })
+
+  it('assertConsistent ignores local children inside the shell', async () => {
+    const ed = await createHeadlessEditor({ replicaId: 10, opaqueNode: isCell })
+    await ed.setHtml('<div data-cell="h"></div><p>tail</p>')
+
+    // The host mounts local content; the CRDT and the rope must still agree.
+    const cellEl = /** @type {Element} */ (ed.element.querySelector('[data-cell]'))
+    cellEl.appendChild(ed.element.ownerDocument.createElement('span'))
+    await flush()
+
+    const report = ed.assertConsistent()
+    expect(report.ok).toBe(true)
+    expect(report.dom).toBe('<div data-cell="h"></div><p>tail</p>')
+  })
+
+  it('rejects agent HTML that carries opaque children instead of silently dropping them', async () => {
+    const ed = await createHeadlessEditor({ replicaId: 11, opaqueNode: isCell })
+
+    const res = await ed.setHtml('<div data-cell="x"><b>local</b></div>')
+    // Canonical form is the shell, so the write is refused (no data loss) but the
+    // host learns what it should have sent.
+    expect(res.ok).toBe(false)
+    expect(res.cleaned).toBe('<div data-cell="x"></div>')
+    expect(ed.getHtml()).toBe('')
+
+    // Table internals are the classic normalization trap; the shell alone is clean.
+    const ok = await ed.setHtml('<div data-cell="x"></div><p>tail</p>')
+    expect(ok.ok).toBe(true)
+  })
+})
+
+describe('opaqueNode: remote ops', () => {
+  it("merges a peer's shell change without pulling in either host's subtree", async () => {
+    const elA = editor()
+    const elB = editor()
+    /** @type {Uint8Array[]} */
+    const opsA = []
+
+    const A = await createRogueNode({
+      element: elA,
+      replicaId: 20,
+      opaqueNode: isCell,
+      onCommit: (p) => opsA.push(p),
+    })
+    elA.innerHTML = '<div data-cell="r"><b>local-a</b></div><p>tail</p>'
+    await flush()
+
+    const B = await createRogueNode({ element: elB, replicaId: 21, opaqueNode: isCell })
+    for (const op of opsA) B.mergeOp(op)
+    expect(B.getString()).toBe('<div data-cell="r"></div><p>tail</p>')
+
+    // B mounts its own local content inside the shell.
+    const cellB = /** @type {Element} */ (elB.querySelector('[data-cell]'))
+    cellB.appendChild(document.createElement('em'))
+    await flush()
+    expect(B.getString()).toBe('<div data-cell="r"></div><p>tail</p>')
+
+    // A edits the shell's attributes; B merges that op.
+    const before = opsA.length
+    const cellA = /** @type {Element} */ (elA.querySelector('[data-cell]'))
+    cellA.setAttribute('data-n', '1')
+    await flush()
+    expect(opsA.length).toBe(before + 1)
+
+    B.mergeOp(opsA[opsA.length - 1])
+    expect(B.getString()).toBe('<div data-cell="r" data-n="1"></div><p>tail</p>')
+    // The re-render drops B's local children — the host re-mounts them (documented).
+    expect(/** @type {Element} */ (elB.querySelector('[data-cell]')).childNodes.length).toBe(0)
+  })
+})
+
+describe('opaqueNode: nested and escaped content', () => {
+  it('drops a nested opaque subtree too', async () => {
+    const el = editor()
+    const n = await createRogueNode({ element: el, replicaId: 22, opaqueNode: isCell })
+    el.innerHTML = '<div data-cell="outer"><div data-cell="inner"><b>x</b></div></div>'
+    await flush()
+    expect(n.getString()).toBe('<div data-cell="outer"></div>')
+  })
+
+  it('keeps entities outside the shell and drops table internals inside it', async () => {
+    const el = editor()
+    const n = await createRogueNode({ element: el, replicaId: 23, opaqueNode: isCell })
+    el.innerHTML =
+      '<div data-cell="t"><table><tr><td>a&nbsp;b</td></tr></table></div><p>x&nbsp;y</p>'
+    await flush()
+    expect(n.getString()).toBe('<div data-cell="t"></div><p>x&nbsp;y</p>')
+    expect(n.assertConsistent().ok).toBe(true)
   })
 })

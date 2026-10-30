@@ -3,9 +3,13 @@
  * scrub + escape the CRDT render uses). Reports whether it round-trips un-mangled
  * and what it normalizes to.
  * @param {string} html @param {Document} doc
+ * @param {import('./dom_rope.js').OpaqueNode} [opaqueNode] An opaque element's
+ *   children are dropped before they reach the CRDT, so they must be dropped
+ *   from the round-trip too — otherwise a widget's local markup (a table that
+ *   normalizes to <tbody>, say) rejects a write that would have stored cleanly.
  * @returns {{ ok: boolean, cleaned: string }}
  */
-export function roundTripHtml(html: string, doc: Document): {
+export function roundTripHtml(html: string, doc: Document, opaqueNode?: import("./dom_rope.js").OpaqueNode): {
     ok: boolean;
     cleaned: string;
 };

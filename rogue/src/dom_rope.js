@@ -117,6 +117,12 @@ export const defaultUnwrapNode = () => false
  * Hosts own the dropped subtree: it must be re-mounted after every render, the
  * element should be `contenteditable="false"` so selection can't descend into
  * content the rope doesn't index, and its state is not covered by undo/snapshots.
+ *
+ * Combining this with a *deep*-cleaning `serializeNode` changes what that hook
+ * sees: the non-opaque path hands it one deep clone per region, while opaque
+ * subtrees are serialized element-by-element (shallow clones). A host that scrubs
+ * nested descendants in `serializeNode` must express the same policy through
+ * `omitNode`/`unwrapNode`, which are applied at every level either way.
  * @typedef {(node: Node) => boolean} OpaqueNode
  */
 
