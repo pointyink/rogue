@@ -86,10 +86,10 @@ export function parse5ValidHtml(html, context) {
  * Pass `doc`/`win`/`element` to bind an existing jsdom (e.g. the MCP server owns
  * the jsdom + sync client); otherwise a fresh jsdom is created.
  *
- * @param {{ replicaId?: number, onCommit?: (payload: Uint8Array) => void, doc?: Document, win?: Window, element?: HTMLElement }} [options]
+ * @param {{ replicaId?: number, onCommit?: (payload: Uint8Array) => void, doc?: Document, win?: Window, element?: HTMLElement, opaqueNode?: import('./dom_rope.js').OpaqueNode }} [options]
  * @returns {Promise<HeadlessEditor>}
  */
-export async function createHeadlessEditor({ replicaId, onCommit, doc, win, element } = {}) {
+export async function createHeadlessEditor({ replicaId, onCommit, doc, win, element, opaqueNode } = {}) {
   if (!doc || !win || !element) {
     const dom = new JSDOM('<!doctype html><html><body></body></html>')
     doc = dom.window.document
@@ -110,6 +110,7 @@ export async function createHeadlessEditor({ replicaId, onCommit, doc, win, elem
     win,
     replicaId,
     validateHtml: parse5ValidHtml,
+    opaqueNode,
     paste: false, // the sidecar owns insert validation; skip the engine's execCommand paste path
     onCommit: (payload) => {
       for (const cb of subscribers) cb(payload)

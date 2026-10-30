@@ -27,6 +27,7 @@ import { createDocBus } from './doc-bus.js'
  *   serializeNode: import('./dom_rope.js').SerializeNode,
  *   omitNode: import('./dom_rope.js').OmitNode,
  *   unwrapNode: import('./dom_rope.js').UnwrapNode,
+ *   opaqueNode?: import('./dom_rope.js').OpaqueNode,
  *   setMode: (mode: 'design' | 'readonly') => void,
  *   getCollapsedSelection: () => { node: Node, offset: number } | null,
  *   getSelectionRange: () => import('./comments.js').DomRange | null,
@@ -78,6 +79,7 @@ export async function createEditorSession({
   serializeNode,
   omitNode,
   unwrapNode,
+  opaqueNode,
   setMode,
   getCollapsedSelection,
   getSelectionRange,
@@ -135,6 +137,7 @@ export async function createEditorSession({
     serializeNode,
     omitNode,
     unwrapNode,
+    opaqueNode,
     replicaId,
     // Editor hosts (TinyMCE/HugeRTE) run their own paste-clean pipeline before
     // the `input` event fires; the engine's own paste listener would double-insert.

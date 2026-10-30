@@ -96,6 +96,33 @@ export const defaultOmitNode = () => false
 /** @internal @type {UnwrapNode} */
 export const defaultUnwrapNode = () => false
 
+/**
+ * Predicate for DOM elements to treat as *opaque*: keep the element's own tags
+ * and attributes (serialized through `serializeNode`), but drop every child from
+ * the rope. The CRDT then stores an empty shell — `<div data-cell="…"></div>` —
+ * while the host keeps whatever it renders inside.
+ *
+ * The fourth quadrant of the node hooks:
+ *
+ * | hook | own tags | children |
+ * |---|---|---|
+ * | `omitNode` | drop | drop |
+ * | `unwrapNode` | drop | keep |
+ * | `opaqueNode` | **keep** | **drop** |
+ * | default | keep | keep |
+ *
+ * Precedence is `omitNode` → `unwrapNode` → `opaqueNode`. A node matching more
+ * than one is a host bug; the first match wins.
+ *
+ * Hosts own the dropped subtree: it must be re-mounted after every render, the
+ * element should be `contenteditable="false"` so selection can't descend into
+ * content the rope doesn't index, and its state is not covered by undo/snapshots.
+ * @typedef {(node: Node) => boolean} OpaqueNode
+ */
+
+/** @internal @type {OpaqueNode} */
+export const defaultOpaqueNode = () => false
+
 /** @internal @param {Element} el @param {SerializeNode} [serializeNode] @returns {string} */
 export function getOpenTag(el, serializeNode = defaultSerializeNode) {
   const closeTag = getCloseTag(el)
@@ -268,8 +295,10 @@ function split(node, index) {
  * @param {WeakMap<Node, RopeNode[]>} nodeMap
  * @param {SerializeNode} serializeNode
  * @param {OmitNode} [omitNode]
+ * @param {UnwrapNode} [unwrapNode]
+ * @param {OpaqueNode} [opaqueNode]
  */
-function toRopeNodes(node, out, nodeMap, serializeNode, omitNode = defaultOmitNode, unwrapNode = defaultUnwrapNode) {
+function toRopeNodes(node, out, nodeMap, serializeNode, omitNode = defaultOmitNode, unwrapNode = defaultUnwrapNode, opaqueNode = defaultOpaqueNode) {
   if (omitNode(node)) return
 
   if (node.nodeType === 3 /* TEXT_NODE */) {
@@ -285,14 +314,18 @@ function toRopeNodes(node, out, nodeMap, serializeNode, omitNode = defaultOmitNo
 
   if (unwrapNode(el)) {
     // Transparent wrapper: keep children, emit no tags for the wrapper itself.
-    for (const child of el.childNodes) toRopeNodes(child, out, nodeMap, serializeNode, omitNode, unwrapNode)
+    for (const child of el.childNodes) toRopeNodes(child, out, nodeMap, serializeNode, omitNode, unwrapNode, opaqueNode)
     return
   }
 
   const open = makeNode(getOpenTag(el, serializeNode), el, 'open')
   out.push(open)
 
-  for (const child of el.childNodes) toRopeNodes(child, out, nodeMap, serializeNode, omitNode, unwrapNode)
+  // Opaque: keep the shell, drop the subtree. A void element has no children to
+  // drop, so this is a no-op for it.
+  if (!opaqueNode(el)) {
+    for (const child of el.childNodes) toRopeNodes(child, out, nodeMap, serializeNode, omitNode, unwrapNode, opaqueNode)
+  }
 
   const ct = getCloseTag(el)
   if (ct) {
@@ -409,14 +442,32 @@ export class DomRope {
    *   one untracked node update accepts as a parent (a resync edge).
    * @param {SerializeNode} [serializeNode]
    * @param {OmitNode} [omitNode]
+   * @param {UnwrapNode} [unwrapNode]
+   * @param {OpaqueNode} [opaqueNode]
    */
-  constructor(root, nodeMap, container, serializeNode = defaultSerializeNode, omitNode = defaultOmitNode, unwrapNode = defaultUnwrapNode) {
+  constructor(root, nodeMap, container, serializeNode = defaultSerializeNode, omitNode = defaultOmitNode, unwrapNode = defaultUnwrapNode, opaqueNode = defaultOpaqueNode) {
     this.root = root
     this._nodeMap = nodeMap
     this._container = container
     this._serializeNode = serializeNode
     this._omitNode = omitNode
     this._unwrapNode = unwrapNode
+    this._opaqueNode = opaqueNode
+  }
+
+  /**
+   * Is `node` an opaque element, or does it live inside one? Opaque subtrees are
+   * not in the rope at all (only the shell is), so a mutation down there is none
+   * of the rope's business: splicing it would throw (the parent isn't tracked)
+   * and, worse, would pull the host's local children into the CRDT.
+   * @param {Node | null} node
+   * @returns {boolean}
+   */
+  _inOpaqueSubtree(node) {
+    for (let n = node; n && n !== this._container; n = n.parentNode) {
+      if (n.nodeType === 1 /* ELEMENT_NODE */ && this._opaqueNode(/** @type {Element} */ (n))) return true
+    }
+    return false
   }
 
   /** @returns {string} */
@@ -601,6 +652,11 @@ export class DomRope {
    * @param {Node} parent
    */
   update(beforeNode, afterNode, parent) {
+    // A mutation inside an opaque element changes nothing the rope tracks (the
+    // subtree was never tokenized). Return before the "parent is not in the rope"
+    // assertion below, which would otherwise fire.
+    if (this._inOpaqueSubtree(parent)) return
+
     const parentToks = this._nodeMap.get(parent) // undefined ⇒ parent must be the container
     const beforeToks = beforeNode ? this._nodeMap.get(beforeNode) : null
     const afterToks  = afterNode  ? this._nodeMap.get(afterNode)  : null
@@ -646,7 +702,7 @@ export class DomRope {
     if (!empty) {
       const last = afterNode ? afterNode.previousSibling : parent.lastChild
       for (let cur = /** @type {Node | null} */ (first); cur; cur = cur.nextSibling) {
-        toRopeNodes(cur, fresh, this._nodeMap, this._serializeNode, this._omitNode, this._unwrapNode)
+        toRopeNodes(cur, fresh, this._nodeMap, this._serializeNode, this._omitNode, this._unwrapNode, this._opaqueNode)
         if (cur === last) break
       }
     }
@@ -678,15 +734,17 @@ export class DomRope {
  * @param {Element} element
  * @param {SerializeNode} [serializeNode]
  * @param {OmitNode} [omitNode]
+ * @param {UnwrapNode} [unwrapNode]
+ * @param {OpaqueNode} [opaqueNode]
  * @returns {DomRope}
  */
-export function buildRope(element, serializeNode = defaultSerializeNode, omitNode = defaultOmitNode, unwrapNode = defaultUnwrapNode) {
+export function buildRope(element, serializeNode = defaultSerializeNode, omitNode = defaultOmitNode, unwrapNode = defaultUnwrapNode, opaqueNode = defaultOpaqueNode) {
   /** @type {WeakMap<Node, RopeNode[]>} */
   const nodeMap = new WeakMap()
   /** @type {RopeNode[]} */
   const ropeNodes = []
   for (const child of element.childNodes) {
-    toRopeNodes(child, ropeNodes, nodeMap, serializeNode, omitNode, unwrapNode)
+    toRopeNodes(child, ropeNodes, nodeMap, serializeNode, omitNode, unwrapNode, opaqueNode)
   }
-  return new DomRope(buildTreap(ropeNodes), nodeMap, element, serializeNode, omitNode, unwrapNode)
+  return new DomRope(buildTreap(ropeNodes), nodeMap, element, serializeNode, omitNode, unwrapNode, opaqueNode)
 }

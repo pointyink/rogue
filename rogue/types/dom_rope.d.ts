@@ -12,9 +12,11 @@ export function getOpenTag(el: Element, serializeNode?: SerializeNode): string;
  * @param {Element} element
  * @param {SerializeNode} [serializeNode]
  * @param {OmitNode} [omitNode]
+ * @param {UnwrapNode} [unwrapNode]
+ * @param {OpaqueNode} [opaqueNode]
  * @returns {DomRope}
  */
-export function buildRope(element: Element, serializeNode?: SerializeNode, omitNode?: OmitNode, unwrapNode?: UnwrapNode): DomRope;
+export function buildRope(element: Element, serializeNode?: SerializeNode, omitNode?: OmitNode, unwrapNode?: UnwrapNode, opaqueNode?: OpaqueNode): DomRope;
 /**
  * Serialize a *cloned, mutable* element to its clean outerHTML string. The
  * default is native `.outerHTML` (no cleaning); a host (e.g. the TinyMCE plugin)
@@ -42,6 +44,31 @@ export const defaultOmitNode: OmitNode;
  */
 /** @internal @type {UnwrapNode} */
 export const defaultUnwrapNode: UnwrapNode;
+/**
+ * Predicate for DOM elements to treat as *opaque*: keep the element's own tags
+ * and attributes (serialized through `serializeNode`), but drop every child from
+ * the rope. The CRDT then stores an empty shell — `<div data-cell="…"></div>` —
+ * while the host keeps whatever it renders inside.
+ *
+ * The fourth quadrant of the node hooks:
+ *
+ * | hook | own tags | children |
+ * |---|---|---|
+ * | `omitNode` | drop | drop |
+ * | `unwrapNode` | drop | keep |
+ * | `opaqueNode` | **keep** | **drop** |
+ * | default | keep | keep |
+ *
+ * Precedence is `omitNode` → `unwrapNode` → `opaqueNode`. A node matching more
+ * than one is a host bug; the first match wins.
+ *
+ * Hosts own the dropped subtree: it must be re-mounted after every render, the
+ * element should be `contenteditable="false"` so selection can't descend into
+ * content the rope doesn't index, and its state is not covered by undo/snapshots.
+ * @typedef {(node: Node) => boolean} OpaqueNode
+ */
+/** @internal @type {OpaqueNode} */
+export const defaultOpaqueNode: OpaqueNode;
 export class DomRope {
     /**
      * @param {RopeNode | null} root  null ⇒ an empty rope (empty document)
@@ -51,14 +78,26 @@ export class DomRope {
      *   one untracked node update accepts as a parent (a resync edge).
      * @param {SerializeNode} [serializeNode]
      * @param {OmitNode} [omitNode]
+     * @param {UnwrapNode} [unwrapNode]
+     * @param {OpaqueNode} [opaqueNode]
      */
-    constructor(root: RopeNode | null, nodeMap: WeakMap<Node, RopeNode[]>, container: Element, serializeNode?: SerializeNode, omitNode?: OmitNode, unwrapNode?: UnwrapNode);
+    constructor(root: RopeNode | null, nodeMap: WeakMap<Node, RopeNode[]>, container: Element, serializeNode?: SerializeNode, omitNode?: OmitNode, unwrapNode?: UnwrapNode, opaqueNode?: OpaqueNode);
     root: RopeNode | null;
     _nodeMap: WeakMap<Node, RopeNode[]>;
     _container: Element;
     _serializeNode: SerializeNode;
     _omitNode: OmitNode;
     _unwrapNode: UnwrapNode;
+    _opaqueNode: OpaqueNode;
+    /**
+     * Is `node` an opaque element, or does it live inside one? Opaque subtrees are
+     * not in the rope at all (only the shell is), so a mutation down there is none
+     * of the rope's business: splicing it would throw (the parent isn't tracked)
+     * and, worse, would pull the host's local children into the CRDT.
+     * @param {Node | null} node
+     * @returns {boolean}
+     */
+    _inOpaqueSubtree(node: Node | null): boolean;
     /** @returns {string} */
     serialize(): string;
     /**
@@ -194,3 +233,26 @@ export type OmitNode = (node: Node) => boolean;
  * format-caret bookmarks, which wrap real content in a `<span data-mce-type="format-caret">`).
  */
 export type UnwrapNode = (node: Node) => boolean;
+/**
+ * Predicate for DOM elements to treat as *opaque*: keep the element's own tags
+ * and attributes (serialized through `serializeNode`), but drop every child from
+ * the rope. The CRDT then stores an empty shell — `<div data-cell="…"></div>` —
+ * while the host keeps whatever it renders inside.
+ *
+ * The fourth quadrant of the node hooks:
+ *
+ * | hook | own tags | children |
+ * |---|---|---|
+ * | `omitNode` | drop | drop |
+ * | `unwrapNode` | drop | keep |
+ * | `opaqueNode` | **keep** | **drop** |
+ * | default | keep | keep |
+ *
+ * Precedence is `omitNode` → `unwrapNode` → `opaqueNode`. A node matching more
+ * than one is a host bug; the first match wins.
+ *
+ * Hosts own the dropped subtree: it must be re-mounted after every render, the
+ * element should be `contenteditable="false"` so selection can't descend into
+ * content the rope doesn't index, and its state is not covered by undo/snapshots.
+ */
+export type OpaqueNode = (node: Node) => boolean;
