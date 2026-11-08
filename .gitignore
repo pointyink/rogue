@@ -2,3 +2,7 @@ node_modules/
 dist/
 .zig-cache/
 zig-out/
+
+# OpenCode agent config lives in ~/.config/opencode, not in the repo.
+.opencode/
+opencode.jsonc
