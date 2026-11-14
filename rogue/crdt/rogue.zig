@@ -3253,3 +3253,117 @@ test "text-only fuzz: with undo sweep" {
         try textOnlyFuzz(10, seed, 5000);
     }
 }
+
+// ── ordering contract ───────────────────────────────────────────────────────
+//
+// Two different orders coexist, and they are not interchangeable:
+//
+//   NodeId      (sequence, replica)  — the global fold order. All replicas must
+//                                      agree on it; `revertTail` and the JS
+//                                      appliedGroups fold depend on it.
+//   CompositeId (replica, sequence)  — the oplog tree key. Replica-first makes
+//                                      "next/prev op for THIS replica" a range
+//                                      scan, which is what undo/redo cursors and
+//                                      getOp need.
+//
+// These tests pin both, plus the invariant that application order (group_order)
+// is whatever the caller merged, not the key order.
+
+test "ordering: NodeId is seq-first, CompositeId is replica-first" {
+    const a = NodeId{ .replica_id = 1, .sequence = 5 };
+    const b = NodeId{ .replica_id = 2, .sequence = 3 };
+    // NodeId: sequence dominates, so replica 2's seq 3 sorts BEFORE replica 1's seq 5.
+    try std.testing.expect(b.lessThan(a));
+
+    const CompositeId = @import("node_id.zig").CompositeId;
+    const ca = CompositeId{ .group_replica = 1, .group_seq = 5, .op_seq = 0 };
+    const cb = CompositeId{ .group_replica = 2, .group_seq = 3, .op_seq = 0 };
+    // CompositeId: replica dominates, so the same pair sorts the other way.
+    try std.testing.expect(ca.lessThan(cb));
+}
+
+test "getOp resolves each replica's group with interleaved sequences" {
+    var alice = try Rogue(u16).init(std.testing.allocator, 1, 64);
+    defer alice.deinit();
+    var bob = try Rogue(u16).init(std.testing.allocator, 2, 64);
+    defer bob.deinit();
+
+    const Op = @import("op.zig").WireOp(u16);
+    var alice_ops: std.ArrayListUnmanaged(Op) = .empty;
+    defer alice_ops.deinit(std.testing.allocator);
+    var bob_ops: std.ArrayListUnmanaged(Op) = .empty;
+    defer bob_ops.deinit(std.testing.allocator);
+
+    try alice.insert(0, &w("aa"), &alice_ops);
+    const alice_id = alice_ops.items[0].insert.id;
+    try alice.merge(alice.multiOp(alice_ops.items));
+
+    // Bob's group sits at a much higher sequence than Alice's.
+    try bob.insert(0, &w("bbbbbbbbbb"), &bob_ops);
+    const bob_id = bob_ops.items[0].insert.id;
+    try bob.merge(bob.multiOp(bob_ops.items));
+
+    var doc = try Rogue(u16).init(std.testing.allocator, 3, 64);
+    defer doc.deinit();
+
+    var roundtrip: std.ArrayListUnmanaged(Op) = .empty;
+    defer roundtrip.deinit(std.testing.allocator);
+
+    _ = try simpleGroup(&doc, alice.multiOp(alice_ops.items));
+    _ = try simpleGroup(&doc, bob.multiOp(bob_ops.items));
+
+    // Both groups resolve by (replica, seq) despite the interleaving.
+    try doc.getOp(alice_id, &roundtrip);
+    try std.testing.expect(roundtrip.items.len > 0);
+    try std.testing.expectEqual(alice_id.replica_id, roundtrip.items[0].insert.id.replica_id);
+    roundtrip.clearRetainingCapacity();
+
+    try doc.getOp(bob_id, &roundtrip);
+    try std.testing.expect(roundtrip.items.len > 0);
+    try std.testing.expectEqual(bob_id.replica_id, roundtrip.items[0].insert.id.replica_id);
+}
+
+test "group_order is merge order, not the replica-first key order" {
+    var high = try Rogue(u16).init(std.testing.allocator, 2, 64); // replica 2
+    defer high.deinit();
+    var low = try Rogue(u16).init(std.testing.allocator, 1, 64); // replica 1
+    defer low.deinit();
+
+    const Op = @import("op.zig").WireOp(u16);
+    var high_ops: std.ArrayListUnmanaged(Op) = .empty;
+    defer high_ops.deinit(std.testing.allocator);
+    var low_ops: std.ArrayListUnmanaged(Op) = .empty;
+    defer low_ops.deinit(std.testing.allocator);
+
+    try high.insert(0, &w("zzz"), &high_ops);
+    try high.merge(high.multiOp(high_ops.items));
+    try low.insert(0, &w("x"), &low_ops);
+    try low.merge(low.multiOp(low_ops.items));
+
+    var doc = try Rogue(u16).init(std.testing.allocator, 3, 64);
+    defer doc.deinit();
+
+    // Apply the *higher* replica first, then the lower one. Key order would be
+    // [1, 2]; application order is [2, 1].
+    _ = try simpleGroup(&doc, high.multiOp(high_ops.items));
+    _ = try simpleGroup(&doc, low.multiOp(low_ops.items));
+
+    try std.testing.expectEqual(@as(usize, 2), doc.group_order.items.len);
+    try std.testing.expectEqual(@as(u16, 2), doc.group_order.items[0].replica_id);
+    try std.testing.expectEqual(@as(u16, 1), doc.group_order.items[1].replica_id);
+
+    // revertTail unwinds the LAST APPLIED group (replica 1's "x"), not the
+    // key-order maximum (replica 2's "zzz").
+    try std.testing.expectEqual(@as(u32, 1), doc.revertTail(1));
+
+    var out: std.ArrayListUnmanaged(u16) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try doc.render(null, null, &out);
+    try std.testing.expectEqualSlices(u16, &w("zzz"), out.items);
+}
+
+/// Merge a multi-op into `doc` and return its group id.
+fn simpleGroup(doc: *Rogue(u16), multi: @import("op.zig").MultiOp(u16)) !NodeId {
+    try doc.merge(multi);
+    return multi.group_id;
+}
