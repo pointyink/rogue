@@ -2,7 +2,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { createSyncClient } from './sync-client.js'
 import { cacheOp, cachedOps, clearDoc as clearCacheDoc } from './doc-cache.js'
-import { enqueue, clearDoc as clearOplogDoc } from './oplog.js'
+import { enqueue, pendingFor, ackMany, clearDoc as clearOplogDoc } from './oplog.js'
 
 // Mock the IndexedDB-backed oplog so we don't need a real IndexedDB.
 vi.mock('./oplog.js', () => ({
@@ -49,8 +49,14 @@ class FakeWebSocket {
     ;(this.listeners[type] ||= []).push(fn)
   }
 
+  /** @type {Uint8Array[]} */
+  sent = []
+
   /** @param {any} data */
-  send(data) {}
+  send(data) {
+    if (data instanceof Uint8Array) this.sent.push(data)
+    else if (data instanceof ArrayBuffer) this.sent.push(new Uint8Array(data))
+  }
 
   close() {}
 
@@ -165,6 +171,49 @@ describe('createSyncClient checkpoint', () => {
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
     // The failed op never merged, so the watermark is still empty → no since.
     expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
+  })
+
+  it('replays an op that was never acked, and never drops it locally', async () => {
+    // The server may commit an op and die before its ack arrives. The op must
+    // stay in the oplog and be replayed on the next connect — that is the only
+    // copy of it until the ack lands.
+    const pending = { id: '3:1', payload: opPayload(3, 1), ts: 1 }
+    vi.mocked(pendingFor).mockResolvedValue([pending])
+    start('wss://sync.example.com/ws/doc-1', 'doc-1', () => 'applied')
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const ws = FakeWebSocket.instances[0]
+
+    // Bootstrap complete: pending ops are replayed (re-applied + re-sent).
+    ws.emitMessage(frame(DISC_JSON_ENVELOPE, new TextEncoder().encode('{"type":"sync_done"}')))
+    await vi.waitFor(() => expect(ws.sent.length).toBeGreaterThan(0))
+
+    // No ack arrived, so nothing was dropped from the queue.
+    expect(vi.mocked(ackMany)).not.toHaveBeenCalled()
+
+    // The socket dies and the client reconnects: the op is sent again.
+    const before = ws.sent.length
+    ws.emitClose()
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
+    const ws2 = FakeWebSocket.instances[1]
+    ws2.emitMessage(frame(DISC_JSON_ENVELOPE, new TextEncoder().encode('{"type":"sync_done"}')))
+    await vi.waitFor(() => expect(ws2.sent.length).toBeGreaterThan(0))
+    expect(before).toBeGreaterThan(0)
+  })
+
+  it('claims an op whose cache write failed (the oplog is the durable copy)', async () => {
+    // The cache is a rebuild accelerator; the oplog is the send queue. If the
+    // cache write fails but the oplog write succeeded, the op is still durable
+    // and will be replayed — so claiming it is correct.
+    vi.mocked(cacheOp).mockRejectedValue(new Error('quota exceeded'))
+    const client = start('wss://sync.example.com/ws/doc-1', 'doc-1', () => 'applied')
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+
+    client.send(opPayload(5, 9))
+    await vi.waitFor(() => expect(vi.mocked(enqueue)).toHaveBeenCalled())
+
+    FakeWebSocket.instances[0].emitClose()
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
+    expect(decodeURIComponent(FakeWebSocket.instances[1].url)).toContain('"5":9')
   })
 
   it('does not treat an IME-deferred op as a gap', async () => {
