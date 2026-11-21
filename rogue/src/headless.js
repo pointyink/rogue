@@ -209,7 +209,7 @@ function makeEditorApi({ node, doc, element, debug, subscribers, opaqueNode = de
  * @property {(html: string) => Promise<{ ok: boolean, cleaned?: string, html?: string }>} appendHtml
  * @property {() => void} undo
  * @property {() => void} redo
- * @property {(payload: Uint8Array) => void} mergeOp
+ * @property {(payload: Uint8Array) => import('./sync.js').ApplyOutcome} mergeOp
  * @property {() => void} markUserEdit
  * @property {(cb: (payload: Uint8Array) => void) => () => boolean} subscribe
  * @property {() => { ok: boolean, crdt: string, dom: string }} assertConsistent

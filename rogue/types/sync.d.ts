@@ -127,8 +127,16 @@ export function nodeSpan(rope: NonNullable<ReturnType<typeof buildRope>>, node: 
  *   the CRDT is missing history — the doc should be exported and reloaded.
  */
 /**
+ * What happened to an op handed to `mergeOp`.
+ *  'applied'  merged into the CRDT (or already there)
+ *  'parked'   a dependency is missing; retried when it arrives
+ *  'rejected' permanently unmergeable, or reverted by validation
+ *  'deferred' held back because an IME owns the DOM
+ * @typedef {'applied' | 'parked' | 'rejected' | 'deferred'} ApplyOutcome
+ */
+/**
  * @typedef {{
- *   mergeOp: (payload: Uint8Array) => void,
+ *   mergeOp: (payload: Uint8Array) => ApplyOutcome,
  *   undo: () => void,
  *   redo: () => void,
  *   beginLoad: () => void,
@@ -317,8 +325,16 @@ export type NodeStats = {
      */
     parkedDropped: number;
 };
+/**
+ * What happened to an op handed to `mergeOp`.
+ *  'applied'  merged into the CRDT (or already there)
+ *  'parked'   a dependency is missing; retried when it arrives
+ *  'rejected' permanently unmergeable, or reverted by validation
+ *  'deferred' held back because an IME owns the DOM
+ */
+export type ApplyOutcome = "applied" | "parked" | "rejected" | "deferred";
 export type RogueNode = {
-    mergeOp: (payload: Uint8Array) => void;
+    mergeOp: (payload: Uint8Array) => ApplyOutcome;
     undo: () => void;
     redo: () => void;
     beginLoad: () => void;

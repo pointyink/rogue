@@ -167,6 +167,22 @@ describe('createSyncClient checkpoint', () => {
     expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
   })
 
+  it('does not treat an IME-deferred op as a gap', async () => {
+    // 'deferred' means the engine is holding the op until the composition ends.
+    // It must not be claimed (no advance) — but it is not a hole either, and
+    // marking it as one would burn the repair budget and log a false failure.
+    start('wss://sync.example.com/ws/doc-1', 'doc-1', () => 'deferred')
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const ws = FakeWebSocket.instances[0]
+
+    ws.emitMessage(frame(DISC_MULTI_OP, opPayload(2, 4)))
+    ws.emitClose()
+
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
+    expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
+    expect(localStorage.getItem('rogue.gaps.doc-1')).toBe(null)
+  })
+
   it('does not advance the watermark when the engine parks the op', async () => {
     // The engine parks an op whose parent hasn't arrived and returns normally —
     // it does not throw. Treating that as merged is the actual production bug:

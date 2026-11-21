@@ -30,7 +30,8 @@ export function advanceWatermark(wm, payload) {
 }
 
 /**
- * Merge an op, then advance the watermark — only when it actually applied.
+ * Merge an op, advance the watermark when it actually applied, and report what
+ * happened.
  *
  * The engine parks an op whose parent hasn't arrived (it does not throw), and a
  * parked op is *not* applied: advancing over it would tell the next sync we have
@@ -39,12 +40,13 @@ export function advanceWatermark(wm, payload) {
  * @param {(payload: Uint8Array) => (string | void)} mergeOp
  * @param {Record<string, number>} wm
  * @param {Uint8Array} payload
- * @returns {Record<string, number>}
+ * @returns {'applied' | 'parked' | 'rejected' | 'deferred'}
  */
 export function mergeAndAdvance(mergeOp, wm, payload) {
-  const outcome = mergeOp(payload)
-  if (outcome === 'parked' || outcome === 'deferred') return wm
-  return advanceWatermark(wm, payload)
+  const outcome = mergeOp(payload) ?? 'applied'
+  if (outcome === 'parked' || outcome === 'deferred') return outcome
+  advanceWatermark(wm, payload)
+  return /** @type {'applied' | 'rejected'} */ (outcome)
 }
 
 /**
