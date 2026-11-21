@@ -3,6 +3,7 @@
  * @returns {SyncClient}
  */
 export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, onReady, onSyncStart, onProgress, onCommentChanged, onSuggestionChanged, onDocDeleted, persist }: SyncClientOptions): SyncClient;
+export type ApplyOutcome = "applied" | "parked" | "rejected" | "deferred";
 /**
  * `persist` defaults to true: every merged op is appended to the IndexedDB doc
  * cache so a browser reload can resume offline. Server-side replicas that never
@@ -13,7 +14,7 @@ export type SyncStatus = "connecting" | "connected" | "disconnected";
 export type SyncClientOptions = {
     wsUrl: string;
     docId: string;
-    mergeOp: (payload: Uint8Array) => void;
+    mergeOp: (payload: Uint8Array) => (ApplyOutcome | void);
     getToken: () => Promise<string>;
     onStatus?: (status: SyncStatus) => void;
     onReady?: () => void;

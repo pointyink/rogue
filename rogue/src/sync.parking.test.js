@@ -27,6 +27,83 @@ function firstText(n) {
   return null
 }
 
+describe('mergeOp outcome', () => {
+  it('reports "parked" when the op arrives out of order (fold path)', async () => {
+    // An op whose gid sorts BELOW the head takes the fold path, which replays it
+    // through applyOp. Reporting the replay's success claimed a parked op as
+    // applied — the same hole, via the other route.
+    const elA = editor()
+    const elC = editor()
+    /** @type {Uint8Array[]} */
+    const fromA = []
+
+    // A authors two ops: (A,1) inserts a paragraph, (A,2) edits inside it.
+    const A = await createRogueNode({ element: elA, onCommit: (p) => fromA.push(p) })
+    elA.innerHTML = '<p>hello</p>'
+    await flush()
+    const a1 = /** @type {Uint8Array} */ (fromA.at(-1))
+    const ta = /** @type {Text} */ (firstText(/** @type {Element} */ (elA.querySelector('p'))))
+    ta.data = ta.data + ' world'
+    await flush()
+    const a2 = /** @type {Uint8Array} */ (fromA.at(-1))
+
+    // C authors five local ops, so its head is (seq 5) — above (A,2).
+    const C = await createRogueNode({ element: elC })
+    for (let i = 0; i < 5; i++) {
+      elC.innerHTML = `<p>local ${i}</p>`
+      await flush()
+      elC.dispatchEvent(new InputEvent('input', { bubbles: true }))
+      await flush()
+    }
+    const head = C.stats().ops
+
+    // (A,2) sorts below the head and depends on (A,1), which C has never seen.
+    expect(head).toBeGreaterThan(0)
+    expect(C.mergeOp(a2)).toBe('parked')
+    expect(C.stats().parked).toBe(1)
+
+    A.destroy()
+    C.destroy()
+  })
+
+  it('reports "parked" for a missing dependency, then "applied"', async () => {
+    // The sync watermark must not advance over a parked op, so the engine has to
+    // say which happened. (It parks rather than throwing — that is the whole
+    // reason this return value exists.)
+    const elA = editor()
+    const elB = editor()
+    const elC = editor()
+    /** @type {Uint8Array[]} */
+    const fromA = []
+    /** @type {Uint8Array[]} */
+    const fromB = []
+
+    const A = await createRogueNode({ element: elA, onCommit: (p) => fromA.push(p) })
+    elA.innerHTML = '<p>hello</p>'
+    await flush()
+
+    const B = await createRogueNode({ element: elB, onCommit: (p) => fromB.push(p) })
+    for (const p of fromA) B.mergeOp(p)
+    const t = /** @type {Text} */ (firstText(/** @type {Element} */ (elB.querySelector('p'))))
+    t.data = t.data + ' world'
+    await flush()
+
+    // C has never seen A's paragraph, so B's edit (children of A's chars) parks.
+    const C = await createRogueNode({ element: elC })
+    const dependent = /** @type {Uint8Array} */ (fromB.at(-1))
+    expect(C.mergeOp(dependent)).toBe('parked')
+
+    for (const p of fromA) expect(C.mergeOp(p)).toBe('applied')
+    // The dependency drained the parked op; re-merging is idempotent.
+    expect(C.mergeOp(dependent)).toBe('applied')
+    expect(C.stats().parked).toBe(0)
+
+    A.destroy()
+    B.destroy()
+    C.destroy()
+  })
+})
+
 describe('out-of-order op delivery (parking)', () => {
   it('a parked op, unparked by its dependency, keeps CRDT ≡ DOM and converges', async () => {
     const elA = editor(), elB = editor(), elC = editor()

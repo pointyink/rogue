@@ -30,16 +30,23 @@ export function advanceWatermark(wm, payload) {
 }
 
 /**
- * Merge an op, then advance the watermark — only on success. If `mergeOp`
- * throws, the watermark is untouched, so the op is re-fetched next sync.
- * @param {(payload: Uint8Array) => void} mergeOp
+ * Merge an op, advance the watermark when it actually applied, and report what
+ * happened.
+ *
+ * The engine parks an op whose parent hasn't arrived (it does not throw), and a
+ * parked op is *not* applied: advancing over it would tell the next sync we have
+ * it, `since` would skip it, and it would stay invisible for ever. So 'parked'
+ * and 'deferred' leave the watermark alone and the op is re-fetched.
+ * @param {(payload: Uint8Array) => (string | void)} mergeOp
  * @param {Record<string, number>} wm
  * @param {Uint8Array} payload
- * @returns {Record<string, number>}
+ * @returns {'applied' | 'parked' | 'rejected' | 'deferred'}
  */
 export function mergeAndAdvance(mergeOp, wm, payload) {
-  mergeOp(payload)
-  return advanceWatermark(wm, payload)
+  const outcome = mergeOp(payload) ?? 'applied'
+  if (outcome === 'parked' || outcome === 'deferred') return outcome
+  advanceWatermark(wm, payload)
+  return /** @type {'applied' | 'rejected'} */ (outcome)
 }
 
 /**

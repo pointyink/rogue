@@ -182,8 +182,17 @@ export function nodeSpan(rope, node) {
  */
 
 /**
+ * What happened to an op handed to `mergeOp`.
+ *  'applied'  merged into the CRDT (or already there)
+ *  'parked'   a dependency is missing; retried when it arrives
+ *  'rejected' permanently unmergeable, or reverted by validation
+ *  'deferred' held back because an IME owns the DOM
+ * @typedef {'applied' | 'parked' | 'rejected' | 'deferred'} ApplyOutcome
+ */
+
+/**
  * @typedef {{
- *   mergeOp: (payload: Uint8Array) => void,
+ *   mergeOp: (payload: Uint8Array) => ApplyOutcome,
  *   undo: () => void,
  *   redo: () => void,
  *   beginLoad: () => void,
@@ -1874,12 +1883,20 @@ export async function createRogueNode({
    * successful merge. Callers see mergeOp as best-effort; the engine
    * eventually applies whatever it can.
    *
+   * Returns the outcome for callers that must not treat a parked op as applied
+   * (the sync watermark in particular — see checkpoint.js):
+   *   'applied'  merged into the CRDT (or already there)
+   *   'parked'   dependency missing; retried when something unblocks it
+   *   'rejected' permanently unmergeable, or rejected by validation
+   *   'deferred' held back because an IME owns the DOM
+   *
    * Falls back to full rerender if partial can't be determined.
    * @param {Uint8Array} payload
    * @param {boolean} [forceHead] Treat the op as at-head even if its gid sorts
    *   before `maxGid`. Used when replaying a reverted tail in application order
    *   (recoverLoad): the ops were already applied, so they must merge, validate
    *   and render in that order rather than re-entering the out-of-order path.
+   * @returns {ApplyOutcome}
    */
   function applyOp(payload, forceHead = false) {
     // Drain pending local edits before merging a remote op (see drainLocal).
@@ -1887,8 +1904,8 @@ export async function createRogueNode({
 
     const gid = gidOf(payload);
     const key = gidKey(gid);
-    if (rejected.has(key)) return;
-    if (appliedKeys.has(key)) return;
+    if (rejected.has(key)) return 'rejected';
+    if (appliedKeys.has(key)) return 'applied';
 
     // The op's affected region, as an escalation of levels from tightest up to
     // the whole top-level block. Used by both the partial render and the
@@ -1898,6 +1915,9 @@ export async function createRogueNode({
     const regionLevels = opBounds ? dom.regionForVisBounds(opBounds) : null;
     const atHead = forceHead || !maxGid || cmpGid(gid, maxGid) > 0;
 
+    /** @type {ApplyOutcome} */
+    let outcome = 'applied'
+
     if (atHead) {
       // Merge the incoming op. 0 → park (dependency missing); -1 → drop
       // (permanently malformed: group_id doesn't match its ops).
@@ -1905,7 +1925,7 @@ export async function createRogueNode({
       if (merged === 0) {
         if (parkedOps.length < PARKED_CAP) parkedOps.push(payload);
         else reportParkedOverflow(payload);
-        return;
+        return 'parked';
       }
       if (merged < 0) {
         // Permanently malformed or at-capacity — it can never apply, so drop it
@@ -1913,7 +1933,7 @@ export async function createRogueNode({
         const err = readCrdtError();
         console.error("[sync] dropping un-mergeable op", gid, err);
         onError?.(err ?? { type: -1, name: "unknown" });
-        return;
+        return 'rejected';
       }
       const prevMax = maxGid;
       trackApplied(gid, payload);
@@ -1942,6 +1962,8 @@ export async function createRogueNode({
         appliedKeys.delete(key);
         untrackLast();
         maxGid = prevMax;
+        // Validation reverted it: the op is in the store but not in the document.
+        outcome = 'rejected'
       }
 
       // Incoming op may have unblocked parked ops — drain them (full render if any
@@ -1983,7 +2005,11 @@ export async function createRogueNode({
 
       // Replay the incoming op + tail in sorted order. Each is now "at head", so it
       // flows through the normal merge → localized round-trip → surgical render path.
+      // The replayed returns are discarded on purpose — what matters to the caller
+      // is the *incoming* op's fate, derived below. Reporting the replay's success
+      // was the bug: an op that parked during the fold was claimed as applied.
       for (const g of replay) applyOp(g.payload);
+      outcome = rejected.has(key) ? 'rejected' : appliedKeys.has(key) ? 'applied' : 'parked'
 
       const drained = !booting && drainParked();
       if (!loading && drained) dom.fullRender();
@@ -2000,6 +2026,7 @@ export async function createRogueNode({
     }
 
     maybeWarnSize();
+    return outcome;
   }
 
   /**
@@ -2135,15 +2162,21 @@ export async function createRogueNode({
   }
 
   return {
+    /**
+     * Merge an op. Best-effort (a missing dependency parks instead of throwing),
+     * but the outcome is returned so a caller can tell "applied" from "parked".
+     * @param {Uint8Array} payload
+     * @returns {'applied'|'parked'|'rejected'|'deferred'}
+     */
     mergeOp(payload) {
       // Defer remote ops while the IME owns the DOM; applying now would
       // re-render over the in-progress composition and lose it. Drained on
       // composition release (compositionend / focusout).
       if (composing) {
         deferredOps.push(payload);
-        return;
+        return 'deferred';
       }
-      applyOp(payload);
+      return applyOp(payload);
     },
 
     /** Enter bootstrap mode: subsequent mergeOp calls merge into the CRDT but

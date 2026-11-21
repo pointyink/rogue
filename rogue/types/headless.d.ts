@@ -62,7 +62,7 @@ export type HeadlessEditor = {
     }>;
     undo: () => void;
     redo: () => void;
-    mergeOp: (payload: Uint8Array) => void;
+    mergeOp: (payload: Uint8Array) => import("./sync.js").ApplyOutcome;
     markUserEdit: () => void;
     subscribe: (cb: (payload: Uint8Array) => void) => () => boolean;
     assertConsistent: () => {

@@ -60,6 +60,8 @@ function frameVariable(disc, payload) {
 }
 
 /**
+ * @typedef {'applied' | 'parked' | 'rejected' | 'deferred'} ApplyOutcome
+ *
  * @typedef {'connecting' | 'connected' | 'disconnected'} SyncStatus
  *
  * `persist` defaults to true: every merged op is appended to the IndexedDB doc
@@ -70,7 +72,7 @@ function frameVariable(disc, payload) {
  * @typedef {{
  *   wsUrl: string,
  *   docId: string,
- *   mergeOp: (payload: Uint8Array) => void,
+ *   mergeOp: (payload: Uint8Array) => (ApplyOutcome | void),
  *   getToken: () => Promise<string>,
  *   onStatus?: (status: SyncStatus) => void,
  *   onReady?: () => void,
@@ -244,12 +246,17 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
    *  @param {Uint8Array} payload
    *  @param {boolean} cache */
   function mergeAndAccount(payload, cache) {
-    // Merge first: if it throws (e.g. UnknownParent), the watermark is untouched
-    // and the bytes aren't counted. Record the replica too: a *later* op from it
-    // might merge fine and raise the floor past this hole, so the gap has to be
-    // requested explicitly.
+    // Merge first. A *parked* op (dependency missing) is not applied — and the
+    // engine parks rather than throwing, so the outcome, not just an exception,
+    // decides whether we may claim it. Either way the replica is recorded: a
+    // later op from it might merge fine and raise the floor past this hole, so
+    // the gap has to be requested explicitly.
     try {
-      mergeAndAdvance(mergeOp, watermark, payload)
+      const outcome = mergeAndAdvance(mergeOp, watermark, payload)
+      // Only a *parked* op is a hole: 'deferred' merely means an IME owns the DOM
+      // and it will be applied on composition end — flagging it as a gap would
+      // burn the repair budget and log a false "unresolved".
+      if (outcome === 'parked') noteGap(payload)
     } catch (err) {
       noteGap(payload)
       throw err

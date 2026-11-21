@@ -46,7 +46,9 @@ describe('mergeAndAdvance', () => {
     const wm = {}
     /** @type {Uint8Array[]} */
     const merged = []
-    mergeAndAdvance((p) => merged.push(p), wm, opPayload(1, 5))
+    mergeAndAdvance((p) => {
+      merged.push(p)
+    }, wm, opPayload(1, 5))
     expect(merged).toHaveLength(1)
     expect(wm).toEqual({ 1: 5 })
   })
