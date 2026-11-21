@@ -1874,6 +1874,13 @@ export async function createRogueNode({
    * successful merge. Callers see mergeOp as best-effort; the engine
    * eventually applies whatever it can.
    *
+   * Returns the outcome for callers that must not treat a parked op as applied
+   * (the sync watermark in particular — see checkpoint.js):
+   *   'applied'  merged into the CRDT (or already there)
+   *   'parked'   dependency missing; retried when something unblocks it
+   *   'rejected' permanently unmergeable, or rejected by validation
+   *   'deferred' held back because an IME owns the DOM
+   *
    * Falls back to full rerender if partial can't be determined.
    * @param {Uint8Array} payload
    * @param {boolean} [forceHead] Treat the op as at-head even if its gid sorts
@@ -1887,8 +1894,8 @@ export async function createRogueNode({
 
     const gid = gidOf(payload);
     const key = gidKey(gid);
-    if (rejected.has(key)) return;
-    if (appliedKeys.has(key)) return;
+    if (rejected.has(key)) return 'rejected';
+    if (appliedKeys.has(key)) return 'applied';
 
     // The op's affected region, as an escalation of levels from tightest up to
     // the whole top-level block. Used by both the partial render and the
@@ -1905,7 +1912,7 @@ export async function createRogueNode({
       if (merged === 0) {
         if (parkedOps.length < PARKED_CAP) parkedOps.push(payload);
         else reportParkedOverflow(payload);
-        return;
+        return 'parked';
       }
       if (merged < 0) {
         // Permanently malformed or at-capacity — it can never apply, so drop it
@@ -1913,6 +1920,7 @@ export async function createRogueNode({
         const err = readCrdtError();
         console.error("[sync] dropping un-mergeable op", gid, err);
         onError?.(err ?? { type: -1, name: "unknown" });
+        return 'rejected';
         return;
       }
       const prevMax = maxGid;
@@ -2135,15 +2143,21 @@ export async function createRogueNode({
   }
 
   return {
+    /**
+     * Merge an op. Best-effort (a missing dependency parks instead of throwing),
+     * but the outcome is returned so a caller can tell "applied" from "parked".
+     * @param {Uint8Array} payload
+     * @returns {'applied'|'parked'|'rejected'|'deferred'}
+     */
     mergeOp(payload) {
       // Defer remote ops while the IME owns the DOM; applying now would
       // re-render over the in-progress composition and lose it. Drained on
       // composition release (compositionend / focusout).
       if (composing) {
         deferredOps.push(payload);
-        return;
+        return 'deferred';
       }
-      applyOp(payload);
+      return applyOp(payload) ?? 'applied';
     },
 
     /** Enter bootstrap mode: subsequent mergeOp calls merge into the CRDT but

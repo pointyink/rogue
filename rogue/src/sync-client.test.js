@@ -167,6 +167,28 @@ describe('createSyncClient checkpoint', () => {
     expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
   })
 
+  it('does not advance the watermark when the engine parks the op', async () => {
+    // The engine parks an op whose parent hasn't arrived and returns normally —
+    // it does not throw. Treating that as merged is the actual production bug:
+    // `since` then skips it for ever and the edit is invisible after a reload.
+    start('wss://sync.example.com/ws/doc-1', 'doc-1', (p) => {
+      const seq = new DataView(p.buffer, p.byteOffset, p.byteLength).getUint32(2, true)
+      return seq === 12 ? 'parked' : 'applied'
+    })
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const ws = FakeWebSocket.instances[0]
+
+    ws.emitMessage(frame(DISC_MULTI_OP, opPayload(1, 12))) // parked
+    ws.emitMessage(frame(DISC_MULTI_OP, opPayload(1, 13))) // applies, must not hide 12
+    ws.emitClose()
+
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
+    // Replica 1 is omitted from `since` (the gap), so the hole is requested again.
+    expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
+    const gaps = localStorage.getItem('rogue.gaps.doc-1')
+    expect(gaps ?? '').toContain('1')
+  })
+
   it('re-requests a replica whose history has a hole (a later op must not hide it)', async () => {
     // Op 10 fails with UnknownParent, then op 11 from the same replica merges.
     // A max watermark moves to 11 and the server never resends 10 — the classic

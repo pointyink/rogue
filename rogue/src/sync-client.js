@@ -18,7 +18,7 @@
 
 import { enqueue, ackMany, pendingFor, pendingCount as pendingCountOp, clearDoc as clearOplogDoc } from './oplog.js'
 import { cacheOp, cachedOps, clearDoc as clearCacheDoc } from './doc-cache.js'
-import { advanceWatermark, mergeAndAdvance, appendSince } from './checkpoint.js'
+import { advanceWatermark, appendSince } from './checkpoint.js'
 import * as multiOpV0 from '@pointyink/serde/multi_op_v0'
 import * as ackV0 from '@pointyink/serde/ack_v0'
 import * as nodeIdV0 from '@pointyink/serde/node_id_v0'
@@ -60,6 +60,8 @@ function frameVariable(disc, payload) {
 }
 
 /**
+ * @typedef {'applied' | 'parked' | 'rejected' | 'deferred'} ApplyOutcome
+ *
  * @typedef {'connecting' | 'connected' | 'disconnected'} SyncStatus
  *
  * `persist` defaults to true: every merged op is appended to the IndexedDB doc
@@ -70,7 +72,7 @@ function frameVariable(disc, payload) {
  * @typedef {{
  *   wsUrl: string,
  *   docId: string,
- *   mergeOp: (payload: Uint8Array) => void,
+ *   mergeOp: (payload: Uint8Array) => (ApplyOutcome | void),
  *   getToken: () => Promise<string>,
  *   onStatus?: (status: SyncStatus) => void,
  *   onReady?: () => void,
@@ -244,12 +246,18 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
    *  @param {Uint8Array} payload
    *  @param {boolean} cache */
   function mergeAndAccount(payload, cache) {
-    // Merge first: if it throws (e.g. UnknownParent), the watermark is untouched
-    // and the bytes aren't counted. Record the replica too: a *later* op from it
-    // might merge fine and raise the floor past this hole, so the gap has to be
-    // requested explicitly.
+    // Merge first. A *parked* op (dependency missing) is not applied — and the
+    // engine parks rather than throwing, so the outcome, not just an exception,
+    // decides whether we may claim it. Either way the replica is recorded: a
+    // later op from it might merge fine and raise the floor past this hole, so
+    // the gap has to be requested explicitly.
     try {
-      mergeAndAdvance(mergeOp, watermark, payload)
+      const outcome = mergeOp(payload)
+      if (outcome === 'parked' || outcome === 'deferred') {
+        noteGap(payload)
+      } else {
+        advanceWatermark(watermark, payload)
+      }
     } catch (err) {
       noteGap(payload)
       throw err

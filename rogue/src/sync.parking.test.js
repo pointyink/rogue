@@ -27,6 +27,45 @@ function firstText(n) {
   return null
 }
 
+describe('mergeOp outcome', () => {
+  it('reports "parked" for a missing dependency, then "applied"', async () => {
+    // The sync watermark must not advance over a parked op, so the engine has to
+    // say which happened. (It parks rather than throwing — that is the whole
+    // reason this return value exists.)
+    const elA = editor()
+    const elB = editor()
+    const elC = editor()
+    /** @type {Uint8Array[]} */
+    const fromA = []
+    /** @type {Uint8Array[]} */
+    const fromB = []
+
+    const A = await createRogueNode({ element: elA, onCommit: (p) => fromA.push(p) })
+    elA.innerHTML = '<p>hello</p>'
+    await flush()
+
+    const B = await createRogueNode({ element: elB, onCommit: (p) => fromB.push(p) })
+    for (const p of fromA) B.mergeOp(p)
+    const t = /** @type {Text} */ (firstText(/** @type {Element} */ (elB.querySelector('p'))))
+    t.data = t.data + ' world'
+    await flush()
+
+    // C has never seen A's paragraph, so B's edit (children of A's chars) parks.
+    const C = await createRogueNode({ element: elC })
+    const dependent = /** @type {Uint8Array} */ (fromB.at(-1))
+    expect(C.mergeOp(dependent)).toBe('parked')
+
+    for (const p of fromA) expect(C.mergeOp(p)).toBe('applied')
+    // The dependency drained the parked op; re-merging is idempotent.
+    expect(C.mergeOp(dependent)).toBe('applied')
+    expect(C.stats().parked).toBe(0)
+
+    A.destroy()
+    B.destroy()
+    C.destroy()
+  })
+})
+
 describe('out-of-order op delivery (parking)', () => {
   it('a parked op, unparked by its dependency, keeps CRDT ≡ DOM and converges', async () => {
     const elA = editor(), elB = editor(), elC = editor()
