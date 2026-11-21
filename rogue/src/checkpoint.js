@@ -44,12 +44,25 @@ export function mergeAndAdvance(mergeOp, wm, payload) {
 
 /**
  * Append the watermark as a `since` query param. Empty watermark → unchanged.
+ *
+ * `omit` names replicas whose history is known to be incomplete (a merge failed
+ * for one of their ops). `since` is a per-replica seq floor, so it cannot ask
+ * for one specific missing op — leaving the replica out makes the server replay
+ * it in full, and merges are idempotent, so over-fetching is safe. Without this,
+ * a later op from the same replica raises the floor past the hole and the
+ * missing parent can never arrive.
  * @param {string} wsUrl
  * @param {Record<string, number>} wm
+ * @param {Set<string>} [omit]
  * @returns {string}
  */
-export function appendSince(wsUrl, wm) {
-  const since = JSON.stringify(wm)
+export function appendSince(wsUrl, wm, omit) {
+  /** @type {Record<string, number>} */
+  const kept = {}
+  for (const [replica, seq] of Object.entries(wm)) {
+    if (!omit?.has(replica)) kept[replica] = seq
+  }
+  const since = JSON.stringify(kept)
   if (since === '{}') return wsUrl
   const sep = wsUrl.includes('?') ? '&' : '?'
   return `${wsUrl}${sep}since=${encodeURIComponent(since)}`

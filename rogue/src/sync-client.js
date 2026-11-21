@@ -138,14 +138,69 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
   /** @type {Record<string, number>} */
   const watermark = {}
 
+  // Replicas whose history this client knows to be incomplete: a merge failed
+  // for one of their ops (almost always UnknownParent), so some op below the
+  // floor is missing. `since` cannot ask for a specific op, so these replicas
+  // are omitted from it and replayed in full on the next connect.
+  /** @type {Set<string>} */
+  /** localStorage key for the replicas that need a full replay. */
+  const incompleteKey = `rogue.gaps.${docId}`
+  const incomplete = new Set(loadIncomplete())
+  // Did anything fail to merge on this connection? If not, a full replay of the
+  // omitted replicas has healed them.
+  let failedThisSync = false
+
+  /** localStorage key for the replicas that need a full replay. The watermark
+   *  itself is deliberately not persisted (see checkpoint.js), but a *gap* is
+   *  different: it says "my history here is incomplete", which stays true across
+   *  reloads until a replay fills it. Without this a hole is only noticed in the
+   *  session that hits it — the failed op is never cached, so a reload can't
+   *  rediscover it from the cache alone.
+   *  @returns {string[]} */
+  function loadIncomplete() {
+    try {
+      const raw = globalThis.localStorage?.getItem(incompleteKey)
+      const parsed = raw ? JSON.parse(raw) : []
+      return Array.isArray(parsed) ? parsed.map(String) : []
+    } catch {
+      return []
+    }
+  }
+
+  function saveIncomplete() {
+    try {
+      if (incomplete.size === 0) globalThis.localStorage?.removeItem(incompleteKey)
+      else globalThis.localStorage?.setItem(incompleteKey, JSON.stringify([...incomplete]))
+    } catch {
+      /* storage unavailable (private mode, server-side replica): in-memory only */
+    }
+  }
+
+  /** Note that an op's replica has a hole this client can't fill locally.
+   *  @param {Uint8Array} payload */
+  function noteGap(payload) {
+    if (payload.byteLength < nodeIdV0.SIZE) return
+    const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength)
+    incomplete.add(String(nodeIdV0.decode(view, 0).replica_id))
+    saveIncomplete()
+    failedThisSync = true
+  }
+
   /** Merge an op, account for its bytes in the load meter, and (optionally)
    *  append it to the doc cache.
    *  @param {Uint8Array} payload
    *  @param {boolean} cache */
   function mergeAndAccount(payload, cache) {
     // Merge first: if it throws (e.g. UnknownParent), the watermark is untouched
-    // and the bytes aren't counted — the un-merged op is re-fetched next sync.
-    mergeAndAdvance(mergeOp, watermark, payload)
+    // and the bytes aren't counted. Record the replica too: a *later* op from it
+    // might merge fine and raise the floor past this hole, so the gap has to be
+    // requested explicitly.
+    try {
+      mergeAndAdvance(mergeOp, watermark, payload)
+    } catch (err) {
+      noteGap(payload)
+      throw err
+    }
     completedBytes += payload.byteLength
     reportProgress(false)
     if (persist && cache) {
@@ -257,6 +312,11 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
         }
         if (msg?.type === 'sync_done') {
           if (!ready) {
+            // A replay that merged everything has healed whatever was missing.
+            if (!failedThisSync && incomplete.size > 0) {
+              incomplete.clear()
+              saveIncomplete()
+            }
             // Replay pending ops, then mark ready + notify. The consumer
             // uses onReady to do its single first render and re-enable
             // editing, so ready must only go true once that's done.
@@ -290,6 +350,8 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
           }
           clearOplogDoc(docId).catch(() => {})
           clearCacheDoc(docId).catch(() => {})
+          incomplete.clear()
+          saveIncomplete()
           onDocDeleted?.(docId)
         }
         return
@@ -309,6 +371,7 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
     if (destroyed) return
     setStatus('connecting')
     ready = false
+    failedThisSync = false
 
     // Fetch a fresh token every connect, so an expired token is transparently
     // refreshed on reconnect (the server closes the socket once `exp` passes).
@@ -323,7 +386,7 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
     }
     if (destroyed) return
 
-    const url = appendSince(wsUrl, watermark)
+    const url = appendSince(wsUrl, watermark, incomplete)
     ws = new WebSocket(url, [WS_PROTOCOL, token])
     ws.binaryType = 'arraybuffer'
 
@@ -354,18 +417,20 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
    *  it survives reload before the server acks.
    *  @param {Uint8Array} payload */
   function send(payload) {
-    // Our own op is already merged locally — advance the watermark so we don't
-    // re-download it on the next reconnect, and cache it so a reload replays it.
-    advanceWatermark(watermark, payload)
-    if (persist) {
-      cacheOp(docId, payload).catch((err) =>
-        console.error('[sync-client] cache write failed:', err),
-      )
-    }
     opChain = opChain
       .then(async () => {
+        // Durability first: the oplog is the only copy of an op the server
+        // hasn't acked. If this write fails, the op lives only in memory, so it
+        // must not be claimed by the watermark — otherwise the next sync tells
+        // the server "I already have it" and nothing can bring it back.
         const id = extractGroupId(payload)
         if (id) await enqueue(docId, id, payload)
+        advanceWatermark(watermark, payload)
+        if (persist) {
+          cacheOp(docId, payload).catch((err) =>
+            console.error('[sync-client] cache write failed:', err),
+          )
+        }
         sendOpFrame(payload)
       })
       .catch((err) => console.error('[sync-client] enqueue/send failed:', err))

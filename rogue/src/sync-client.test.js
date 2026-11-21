@@ -2,7 +2,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { createSyncClient } from './sync-client.js'
 import { cacheOp, cachedOps, clearDoc as clearCacheDoc } from './doc-cache.js'
-import { clearDoc as clearOplogDoc } from './oplog.js'
+import { enqueue, clearDoc as clearOplogDoc } from './oplog.js'
 
 // Mock the IndexedDB-backed oplog so we don't need a real IndexedDB.
 vi.mock('./oplog.js', () => ({
@@ -167,6 +167,62 @@ describe('createSyncClient checkpoint', () => {
     expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
   })
 
+  it('re-requests a replica whose history has a hole (a later op must not hide it)', async () => {
+    // Op 10 fails with UnknownParent, then op 11 from the same replica merges.
+    // A max watermark moves to 11 and the server never resends 10 — the classic
+    // permanent hole: 10's children park forever. The replica must be requested
+    // again instead.
+    start('wss://sync.example.com/ws/doc-1', 'doc-1', (p) => {
+      const seq = new DataView(p.buffer, p.byteOffset, p.byteLength).getUint32(2, true)
+      if (seq === 10) throw new Error('UnknownParent')
+    })
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const ws = FakeWebSocket.instances[0]
+
+    ws.emitMessage(frame(DISC_MULTI_OP, opPayload(1, 10))) // fails
+    ws.emitMessage(frame(DISC_MULTI_OP, opPayload(1, 11))) // merges, hides the hole today
+    ws.emitClose()
+
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
+    expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
+  })
+
+  it('remembers a hole across reloads (the failed op is never cached)', async () => {
+    // Session 1: a merge fails. The failed op is not in the cache, so a reload
+    // cannot rediscover it from the cache — the gap has to be remembered or the
+    // replica's floor hides it for ever.
+    start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {
+      throw new Error('UnknownParent')
+    })
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    FakeWebSocket.instances[0].emitMessage(frame(DISC_MULTI_OP, opPayload(4, 7)))
+
+    // Session 2: fresh client whose cache holds a *later* op from the same
+    // replica. Without the remembered gap that op would set the floor to 4:8 and
+    // hide 4:7 for ever.
+    vi.mocked(cachedOps).mockResolvedValueOnce([opPayload(4, 8)])
+    start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2))
+    // Replica 4 is omitted from `since`, so the server replays it in full.
+    expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
+  })
+
+  it('does not advance the watermark when the op was never queued', async () => {
+    // The oplog write is the only durable copy of an unsent op. If it fails, the
+    // op exists in memory only; advancing the watermark would tell the next sync
+    // "I already have it", and the server would never send it back.
+    vi.mocked(enqueue).mockRejectedValueOnce(new Error('quota exceeded'))
+    const client = start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+
+    client.send(opPayload(7, 42))
+    await vi.waitFor(() => expect(vi.mocked(enqueue)).toHaveBeenCalled())
+
+    FakeWebSocket.instances[0].emitClose()
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
+    expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
+  })
+
   it('replays the cached op log and resumes from its watermark (reload resume)', async () => {
     vi.mocked(cachedOps).mockResolvedValueOnce([opPayload(1, 10), opPayload(2, 5)])
 
@@ -297,7 +353,11 @@ describe('createSyncClient checkpoint', () => {
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
 
     client.send(opPayload(1, 10))
-    expect(vi.mocked(cacheOp)).toHaveBeenCalledWith('doc-1', expect.any(Uint8Array))
+    // The cache write happens after the op is durably queued (enqueue → claim →
+    // cache), so it lands on a later microtask.
+    await vi.waitFor(() =>
+      expect(vi.mocked(cacheOp)).toHaveBeenCalledWith('doc-1', expect.any(Uint8Array)),
+    )
   })
 
   it('clears local state and fires onDocDeleted on a doc_deleted envelope', async () => {
