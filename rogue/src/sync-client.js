@@ -138,52 +138,105 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
   /** @type {Record<string, number>} */
   const watermark = {}
 
-  // Replicas whose history this client knows to be incomplete: a merge failed
-  // for one of their ops (almost always UnknownParent), so some op below the
-  // floor is missing. `since` cannot ask for a specific op, so these replicas
-  // are omitted from it and replayed in full on the next connect.
   /** @type {Set<string>} */
-  /** localStorage key for the replicas that need a full replay. */
-  const incompleteKey = `rogue.gaps.${docId}`
-  const incomplete = new Set(loadIncomplete())
-  // Did anything fail to merge on this connection? If not, a full replay of the
-  // omitted replicas has healed them.
-  let failedThisSync = false
+  /** localStorage key for the repair state: which replicas need a full replay,
+   *  and how many replays each has already had. The watermark itself is
+   *  deliberately not persisted (see checkpoint.js), but a *gap* is different: it
+   *  says "my history here is incomplete", which stays true across reloads until
+   *  a replay fills it. Without this a hole is only noticed in the session that
+   *  hits it — the failed op is never cached, so a reload can't rediscover it
+   *  from the cache alone. */
+  const repairKey = `rogue.gaps.${docId}`
 
-  /** localStorage key for the replicas that need a full replay. The watermark
-   *  itself is deliberately not persisted (see checkpoint.js), but a *gap* is
-   *  different: it says "my history here is incomplete", which stays true across
-   *  reloads until a replay fills it. Without this a hole is only noticed in the
-   *  session that hits it — the failed op is never cached, so a reload can't
-   *  rediscover it from the cache alone.
-   *  @returns {string[]} */
-  function loadIncomplete() {
+  // A gap whose parent is genuinely absent from the server cannot be repaired by
+  // asking again, so a replica gets at most this many full replays. Past that it
+  // is marked unrepairable and left alone: re-downloading its whole history on
+  // every connect would be a permanent bandwidth loop that never succeeds.
+  const MAX_REPAIR_REPLAYS = 2
+
+  /** @returns {{ gone: string[], attempts: Record<string, number> }} */
+  function loadRepairState() {
     try {
-      const raw = globalThis.localStorage?.getItem(incompleteKey)
-      const parsed = raw ? JSON.parse(raw) : []
-      return Array.isArray(parsed) ? parsed.map(String) : []
+      const raw = globalThis.localStorage?.getItem(repairKey)
+      if (!raw) return { gone: [], attempts: {} }
+      const parsed = JSON.parse(raw)
+      // Older/partial shapes degrade to "nothing known".
+      return {
+        gone: Array.isArray(parsed?.gone) ? parsed.gone.map(String) : [],
+        attempts: parsed?.attempts && typeof parsed.attempts === 'object' ? parsed.attempts : {},
+      }
     } catch {
-      return []
+      return { gone: [], attempts: {} }
     }
   }
 
-  function saveIncomplete() {
+  const initialRepair = loadRepairState()
+  /** @type {Set<string>} replicas that need a full replay on the next connect */
+  const incomplete = new Set(initialRepair.gone)
+  /** @type {Map<string, number>} replica -> full replays attempted */
+  const repairAttempts = new Map(
+    Object.entries(initialRepair.attempts).map(([replica, n]) => [replica, Number(n)]),
+  )
+
+  function saveRepairState() {
     try {
-      if (incomplete.size === 0) globalThis.localStorage?.removeItem(incompleteKey)
-      else globalThis.localStorage?.setItem(incompleteKey, JSON.stringify([...incomplete]))
+      if (incomplete.size === 0 && repairAttempts.size === 0) {
+        globalThis.localStorage?.removeItem(repairKey)
+        return
+      }
+      globalThis.localStorage?.setItem(
+        repairKey,
+        JSON.stringify({ gone: [...incomplete], attempts: Object.fromEntries(repairAttempts) }),
+      )
     } catch {
       /* storage unavailable (private mode, server-side replica): in-memory only */
     }
   }
 
-  /** Note that an op's replica has a hole this client can't fill locally.
-   *  @param {Uint8Array} payload */
+  // Did anything fail to merge on this connection? If not, a full replay of the
+  // omitted replicas has healed them.
+  let failedThisSync = false
+
+  // Replicas this connection is replaying in full (omitted from `since`).
+  /** @type {Set<string>} */
+  let replaying = new Set()
+
+  /**
+   * Note that an op's replica has a hole this client can't fill locally.
+   *
+   * The repair (omitting the replica from `since`) takes effect on the **next**
+   * connect: a live socket is not dropped just because one op failed, since a
+   * forced reconnect here could flap. So a failure mid-session leaves that op
+   * unapplied — readable document, one missing change — until the next natural
+   * reconnect (network blip, token refresh, reload).
+   * @param {Uint8Array} payload
+   */
   function noteGap(payload) {
     if (payload.byteLength < nodeIdV0.SIZE) return
     const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength)
-    incomplete.add(String(nodeIdV0.decode(view, 0).replica_id))
-    saveIncomplete()
+    const replica = String(nodeIdV0.decode(view, 0).replica_id)
     failedThisSync = true
+    const attempts = repairAttempts.get(replica) ?? 0
+    if (attempts >= MAX_REPAIR_REPLAYS) {
+      // Known-unrepairable: its parent is not on the server. Leave it alone —
+      // re-queuing it would restart the replay loop.
+      return
+    }
+    if (replaying.has(replica)) {
+      const next = attempts + 1
+      repairAttempts.set(replica, next)
+      if (next >= MAX_REPAIR_REPLAYS) {
+        // The full replay we just asked for did not produce the parent. Stop
+        // omitting the replica; surface it once and let the host offer a repair.
+        incomplete.delete(replica)
+        saveRepairState()
+        console.error('[sync-client] gap unresolved after full replay:', { docId, replica })
+        return
+      }
+      saveRepairState()
+    }
+    incomplete.add(replica)
+    saveRepairState()
   }
 
   /** Merge an op, account for its bytes in the load meter, and (optionally)
@@ -315,7 +368,8 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
             // A replay that merged everything has healed whatever was missing.
             if (!failedThisSync && incomplete.size > 0) {
               incomplete.clear()
-              saveIncomplete()
+              repairAttempts.clear()
+              saveRepairState()
             }
             // Replay pending ops, then mark ready + notify. The consumer
             // uses onReady to do its single first render and re-enable
@@ -351,7 +405,8 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
           clearOplogDoc(docId).catch(() => {})
           clearCacheDoc(docId).catch(() => {})
           incomplete.clear()
-          saveIncomplete()
+          repairAttempts.clear()
+          saveRepairState()
           onDocDeleted?.(docId)
         }
         return
@@ -386,6 +441,7 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
     }
     if (destroyed) return
 
+    replaying = new Set(incomplete)
     const url = appendSince(wsUrl, watermark, incomplete)
     ws = new WebSocket(url, [WS_PROTOCOL, token])
     ws.binaryType = 'arraybuffer'
@@ -423,14 +479,17 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
         // hasn't acked. If this write fails, the op lives only in memory, so it
         // must not be claimed by the watermark — otherwise the next sync tells
         // the server "I already have it" and nothing can bring it back.
-        const id = extractGroupId(payload)
-        if (id) await enqueue(docId, id, payload)
-        advanceWatermark(watermark, payload)
+        // Cache first and independently: it is what a reload replays, so it
+        // must survive an oplog failure. Only the *claim* (the watermark) is
+        // gated on the oplog write succeeding.
         if (persist) {
           cacheOp(docId, payload).catch((err) =>
             console.error('[sync-client] cache write failed:', err),
           )
         }
+        const id = extractGroupId(payload)
+        if (id) await enqueue(docId, id, payload)
+        advanceWatermark(watermark, payload)
         sendOpFrame(payload)
       })
       .catch((err) => console.error('[sync-client] enqueue/send failed:', err))

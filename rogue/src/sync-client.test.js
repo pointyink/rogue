@@ -187,6 +187,44 @@ describe('createSyncClient checkpoint', () => {
     expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
   })
 
+  it('keeps the cache copy when the oplog write fails', async () => {
+    // The oplog is the send queue; the cache is what a reload replays. An
+    // enqueue failure must not cost the op both, or the edit vanishes on reload.
+    vi.mocked(enqueue).mockRejectedValueOnce(new Error('quota exceeded'))
+    const client = start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+
+    client.send(opPayload(7, 43))
+    await vi.waitFor(() =>
+      expect(vi.mocked(cacheOp)).toHaveBeenCalledWith('doc-1', expect.any(Uint8Array)),
+    )
+  })
+
+  it('stops replaying a replica whose parent never arrives', async () => {
+    // A full replay that still fails means the parent is not on the server.
+    // Omitting the replica on every reconnect would re-download its whole
+    // history for ever, so after a couple of attempts we give up and keep the
+    // ops unapplied instead.
+    const fail = () => {
+      throw new Error('UnknownParent')
+    }
+    for (let session = 0; session < 4; session++) {
+      const before = FakeWebSocket.instances.length
+      const client = start('wss://sync.example.com/ws/doc-1', 'doc-1', fail)
+      await vi.waitFor(() => expect(FakeWebSocket.instances.length).toBeGreaterThan(before))
+      const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
+      ws.emitMessage(frame(DISC_MULTI_OP, opPayload(9, 1)))
+      ws.emitMessage(frame(DISC_JSON_ENVELOPE, new TextEncoder().encode('{"type":"sync_done"}')))
+      client.destroy()
+    }
+    // After MAX_REPAIR_REPLAYS failed replays the replica is no longer queued
+    // for a replay, and the count is remembered so it can't be re-queued later.
+    const raw = localStorage.getItem('rogue.gaps.doc-1')
+    const state = raw ? JSON.parse(raw) : { gone: [], attempts: {} }
+    expect(state.gone).not.toContain('9')
+    expect(state.attempts['9']).toBe(2)
+  })
+
   it('remembers a hole across reloads (the failed op is never cached)', async () => {
     // Session 1: a merge fails. The failed op is not in the cache, so a reload
     // cannot rediscover it from the cache — the gap has to be remembered or the
@@ -201,10 +239,11 @@ describe('createSyncClient checkpoint', () => {
     // replica. Without the remembered gap that op would set the floor to 4:8 and
     // hide 4:7 for ever.
     vi.mocked(cachedOps).mockResolvedValueOnce([opPayload(4, 8)])
-    start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
+    const second = start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2))
     // Replica 4 is omitted from `since`, so the server replays it in full.
     expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
+    second.destroy()
   })
 
   it('does not advance the watermark when the op was never queued', async () => {
