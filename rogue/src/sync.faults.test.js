@@ -184,8 +184,8 @@ describe('no lost ops (fault matrix)', () => {
     // keeps the first. The second is **acked anyway** — `flush` acks every id in
     // the batch, and `ON CONFLICT DO NOTHING` never tells it the insert was a
     // no-op — so the loser is pruned from its own oplog and exists nowhere
-    // durable. Verified against Postgres (pointy TestConflictingOpIsAckedButNotStored:
-    // rows=1, stored = the first write, acks = [7:42]).
+    // durable. Verified against Postgres: rows=1, stored = the first write,
+    // acks = [7:42].
     const a = startClient()
     await settle(60)
     a.client.send(op(1, 1, { tag: 'aaaa' }))
