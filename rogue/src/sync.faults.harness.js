@@ -50,6 +50,16 @@ export function op(replica, seq, o = {}) {
   return out
 }
 
+/**
+ * @param {Uint8Array} a @param {Uint8Array} b
+ * @returns {boolean}
+ */
+export function sameBytes(a, b) {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
 /** The parent key of a payload, or null. @param {Uint8Array} p */
 export function parentOf(p) {
   const view = new DataView(p.buffer, p.byteOffset, p.byteLength)
@@ -89,7 +99,7 @@ export class FakeHub {
     this.docs = new Map()
     /** @type {Map<string, Map<string, Payload>>} ops received but NOT committed (lost on a crash) */
     this.pending = new Map()
-    /** @type {string[]} replica:seq notices of "same key, different bytes" */
+    /** @type {string[]} replica:seq keys the PK discarded because different bytes were already stored */
     this.conflicts = []
     this.readOnly = opts.readOnly ?? false
     this.acksDropped = 0
@@ -127,17 +137,16 @@ export class FakeHub {
       return null
     }
     const key = keyOf(payload)
-    const stored = this.doc(docId)
-    const existing = stored.get(key)
-    if (existing) {
-      // The PK makes this idempotent — but two different ops at one (replica,seq)
-      // is a fork, and the second write is currently discarded without a word.
-      if (existing.length !== payload.length || !existing.every((b, i) => b === payload[i])) {
-        this.conflicts.push(key)
-        return null
-      }
-      return [key] // already committed: re-ack so a crashed client can prune
-    }
+    const existing = this.doc(docId).get(key)
+    // The PK is (seq, replica). Two *different* ops at one key is a fork; the
+    // insert is ON CONFLICT DO NOTHING, so the existing bytes win and the new
+    // ones are discarded. The hub cannot tell — it never compares — which is
+    // why this only records for the test's benefit.
+    if (existing && !sameBytes(existing, payload)) this.conflicts.push(key)
+
+    // Everything received joins the batch, conflicts included. That is the
+    // load-bearing detail: `flush` acks every id in the batch, whether or not
+    // its insert did anything.
     this.pendingFor(docId).set(key, payload)
     return null // not acked until the flush commits
   }
@@ -148,7 +157,12 @@ export class FakeHub {
     const stored = this.doc(docId)
     const ids = []
     for (const [key, payload] of pending) {
-      if (!stored.has(key)) stored.set(key, payload)
+      if (stored.has(key)) {
+        // ON CONFLICT DO NOTHING — the stored bytes survive, the new ones are
+        // dropped. Real hub: still acked (see the note in `receive`).
+      } else {
+        stored.set(key, payload)
+      }
       ids.push(key)
     }
     pending.clear()
@@ -244,8 +258,8 @@ export class FakeSocket {
     const len = view.getUint32(2, true)
     const payload = /** @type {Payload} */ (bytes.slice(6, 6 + len))
     this.sentOps += 1
-    const ack = this.hub.receive(this.docId, payload)
-    if (ack) this.hub.emitAck(ack)
+    // Hand it to the server; any ack comes from `flush`, never from `receive`.
+    this.hub.receive(this.docId, payload)
   }
 
   close() {
