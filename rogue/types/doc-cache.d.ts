@@ -2,20 +2,69 @@
  * Append an op to the doc's cached history. Keyed by (replica, seq) from the
  * op's group node id, so re-caching is an idempotent no-op. The op is stored
  * as raw multi_op_v0 bytes (structured-cloned, survives reload unchanged).
+ *
+ * `own` marks an op this client authored, so bootstrap can tell which cached
+ * ops it may have to re-send (see `cachedRows`).
  * @param {string} docId
  * @param {Uint8Array} payload multi_op_v0 binary as emitted by the CRDT
+ * @param {{ own?: boolean }} [opts]
+ * @returns {Promise<void>}
  */
-export function cacheOp(docId: string, payload: Uint8Array): Promise<void>;
+export function cacheOp(docId: string, payload: Uint8Array, opts?: {
+    own?: boolean;
+}): Promise<void>;
+/**
+ * Every cached op for a doc, with its provenance, in canonical (seq, replica)
+ * order — the order to replay into a fresh CRDT.
+ * @param {string} docId
+ * @returns {Promise<Array<{ payload: Uint8Array, own: boolean }>>}
+ */
+export function cachedRows(docId: string): Promise<Array<{
+    payload: Uint8Array;
+    own: boolean;
+}>>;
 /**
  * Return every cached op for a doc, in canonical (seq, replica) order — the
- * order to replay into a fresh CRDT. Missing/partial logs are fine: the
- * watermark is derived from exactly these ops, so the server sends the gap.
+ * order to replay into a fresh CRDT. Prefer `cachedRows` when provenance
+ * matters.
  * @param {string} docId
  * @returns {Promise<Uint8Array[]>}
  */
 export function cachedOps(docId: string): Promise<Uint8Array[]>;
 /**
- * Drop a doc's cached history (e.g. on doc delete).
+ * @param {string} docId
+ * @returns {Promise<Record<string, number>>} replica id → confirmed floor
+ */
+export function confirmedFloors(docId: string): Promise<Record<string, number>>;
+/**
+ * Advance a replica's confirmed floor by one, if this seq is the next one.
+ *
+ * The read and the write are one transaction, so concurrent callers cannot
+ * both see the same floor and leapfrog. A seq that is not exactly `floor + 1`
+ * is ignored: either it is already covered, or there is a hole below it — and
+ * the whole point is that a hole must not be stepped over.
+ * @param {string} docId
+ * @param {number} replica
+ * @param {number} seq
+ * @returns {Promise<number>} the floor after the attempt
+ */
+export function raiseConfirmed(docId: string, replica: number, seq: number): Promise<number>;
+/**
+ * Force a replica's confirmed floor, past a hole that two full replays could
+ * not fill. This is the one place the floor may skip a seq: the op is
+ * genuinely gone from the server, and continuing to ask for it would re-download
+ * the replica's whole tail on every connect, for ever. Monotonic — never moves
+ * backwards.
+ * @param {string} docId
+ * @param {number} replica
+ * @param {number} seq
+ * @returns {Promise<number>} the floor after the write
+ */
+export function setConfirmed(docId: string, replica: number, seq: number): Promise<number>;
+/**
+ * Drop a doc's cached history and its confirmed floor (e.g. on doc delete).
+ * They go together: a floor without the history would skip ops on the next
+ * sync, and the history without the floor only costs a re-download.
  * @param {string} docId
  */
 export function clearDoc(docId: string): Promise<void>;

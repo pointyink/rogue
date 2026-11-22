@@ -92,30 +92,33 @@ describe('no lost ops (local write failures)', () => {
     expect(await cachedOps(docId)).toHaveLength(1)
   })
 
-  it.fails('I2: an op that is only in the cache still reaches the server (KNOWN HOLE)', async () => {
+  it('I2: an op that is only in the cache still reaches the server', async () => {
     const a = startClient()
     await settle(60)
 
+    // The oplog write fails after the cache write has already landed: the
+    // window a crash lands in. The op is applied, cached, and never queued.
     gate.failEnqueue = true
     a.client.send(op(12, 1))
     await settle(80)
     gate.failEnqueue = false
     expect(await pendingFor(docId)).toHaveLength(0)
 
-    // Reload. Bootstrap replays the cache, which rebuilds the watermark from
-    // it — so the client now claims 12:1 even though the server has never seen
-    // it, and the oplog is empty so nothing is replayed.
     a.client.destroy()
     await settle(20)
     const b = startClient()
-    await settle(160)
+    await settle(200) // bootstrap → reconcile → sync_done → replay
 
     expect(b.model.applied.has('12:1')).toBe(true) // the local doc keeps the edit
-    // The reload did claim it: this is the part that makes the hole permanent.
-    expect(lastSince()['12']).toBe(1)
+    // Not claimed: no ack ever arrived, so the floor never covered it.
+    expect(lastSince()['12']).toBeUndefined()
+    // …and not stranded either: reconcile put it back in the queue and the
+    // reconnect's replay got it to the server.
+    hub.flush(docId)
+    await settle(60)
     expect(
       hub.doc(docId).size,
-      'the op is in the cache and claimed by the watermark, but was never sent',
+      'the cache-only op was reconciled into the queue and re-sent',
     ).toBeGreaterThan(0)
   })
 })

@@ -1,8 +1,14 @@
 // @ts-check
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { createSyncClient } from './sync-client.js'
-import { cacheOp, cachedOps, clearDoc as clearCacheDoc } from './doc-cache.js'
+import {
+  cacheOp,
+  cachedRows,
+  confirmedFloors,
+  clearDoc as clearCacheDoc,
+} from './doc-cache.js'
 import { enqueue, pendingFor, ackMany, clearDoc as clearOplogDoc } from './oplog.js'
+import * as ackV0 from '@pointyink/serde/ack_v0'
 
 // Mock the IndexedDB-backed oplog so we don't need a real IndexedDB.
 vi.mock('./oplog.js', () => ({
@@ -17,6 +23,10 @@ vi.mock('./oplog.js', () => ({
 vi.mock('./doc-cache.js', () => ({
   cacheOp: vi.fn(() => Promise.resolve()),
   cachedOps: vi.fn(() => Promise.resolve([])),
+  cachedRows: vi.fn(() => Promise.resolve([])),
+  confirmedFloors: vi.fn(() => Promise.resolve({})),
+  raiseConfirmed: vi.fn(() => Promise.resolve(0)),
+  setConfirmed: vi.fn(() => Promise.resolve(0)),
   clearDoc: vi.fn(() => Promise.resolve()),
 }))
 
@@ -101,7 +111,16 @@ function opPayload(replicaId, sequence) {
 }
 
 const DISC_MULTI_OP = 3
+const DISC_ACK = 4
 const DISC_JSON_ENVELOPE = 5
+
+/** An ack_v0 payload for a list of [replica, seq] pairs.
+ *  @param {Array<[number, number]>} pairs
+ *  @returns {Uint8Array}
+ */
+function ackPayload(pairs) {
+  return ackV0.encode(pairs.map(([replica_id, sequence]) => ({ replica_id, sequence })))
+}
 
 /** @param {string} url @param {string} docId @param {(p: Uint8Array) => void} mergeOp */
 function start(url, docId, mergeOp) {
@@ -144,17 +163,38 @@ describe('createSyncClient checkpoint', () => {
     expect(FakeWebSocket.instances[0].url).toBe('wss://sync.example.com/ws/doc-1')
   })
 
-  it('sends the advanced watermark as since on reconnect', async () => {
+  it('sends the confirmed floor as since on reconnect', async () => {
     start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
     const ws = FakeWebSocket.instances[0]
 
-    ws.emitMessage(frame(DISC_MULTI_OP, opPayload(1, 10)))
+    // A contiguous run: each op the server streams confirms the next seq.
+    for (const seq of [1, 2, 3]) ws.emitMessage(frame(DISC_MULTI_OP, opPayload(1, seq)))
+    await new Promise((r) => setTimeout(r, 0))
     ws.emitClose()
 
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
     expect(FakeWebSocket.instances[1].url).toBe(
-      `wss://sync.example.com/ws/doc-1?since=${encodeURIComponent('{"1":10}')}`,
+      `wss://sync.example.com/ws/doc-1?since=${encodeURIComponent('{"1":3}')}`,
+    )
+  })
+
+  it('does not step the floor over a hole (a later op must not hide it)', async () => {
+    // This is the whole point of a floor instead of a max: 2 never arrived, so
+    // 3 applying must not move `since` past it. `since` stays at 1 and the next
+    // connect asks for 2 again.
+    start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const ws = FakeWebSocket.instances[0]
+
+    ws.emitMessage(frame(DISC_MULTI_OP, opPayload(1, 1)))
+    ws.emitMessage(frame(DISC_MULTI_OP, opPayload(1, 3))) // 2 is missing
+    await new Promise((r) => setTimeout(r, 0))
+    ws.emitClose()
+
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
+    expect(FakeWebSocket.instances[1].url).toBe(
+      `wss://sync.example.com/ws/doc-1?since=${encodeURIComponent('{"1":1}')}`,
     )
   })
 
@@ -200,10 +240,10 @@ describe('createSyncClient checkpoint', () => {
     expect(before).toBeGreaterThan(0)
   })
 
-  it('claims an op whose cache write failed (the oplog is the durable copy)', async () => {
-    // The cache is a rebuild accelerator; the oplog is the send queue. If the
-    // cache write fails but the oplog write succeeded, the op is still durable
-    // and will be replayed — so claiming it is correct.
+  it('survives a cache write failure without claiming the op', async () => {
+    // The cache is a rebuild accelerator; the oplog is the send queue. A failed
+    // cache write must not stop the op being queued — but queued is not
+    // confirmed, so `since` stays empty until an ack proves the server has it.
     vi.mocked(cacheOp).mockRejectedValue(new Error('quota exceeded'))
     const client = start('wss://sync.example.com/ws/doc-1', 'doc-1', () => 'applied')
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
@@ -213,7 +253,10 @@ describe('createSyncClient checkpoint', () => {
 
     FakeWebSocket.instances[0].emitClose()
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
-    expect(decodeURIComponent(FakeWebSocket.instances[1].url)).toContain('"5":9')
+    const ws2 = FakeWebSocket.instances[1]
+    ws2.emitMessage(frame(DISC_JSON_ENVELOPE, new TextEncoder().encode('{"type":"sync_done"}')))
+    await vi.waitFor(() => expect(ws2.sent.length).toBeGreaterThan(0))
+    expect(ws2.url).toBe('wss://sync.example.com/ws/doc-1')
   })
 
   it('does not treat an IME-deferred op as a gap', async () => {
@@ -283,7 +326,9 @@ describe('createSyncClient checkpoint', () => {
 
     client.send(opPayload(7, 43))
     await vi.waitFor(() =>
-      expect(vi.mocked(cacheOp)).toHaveBeenCalledWith('doc-1', expect.any(Uint8Array)),
+      expect(vi.mocked(cacheOp)).toHaveBeenCalledWith('doc-1', expect.any(Uint8Array), {
+        own: true,
+      }),
     )
   })
 
@@ -325,7 +370,7 @@ describe('createSyncClient checkpoint', () => {
     // Session 2: fresh client whose cache holds a *later* op from the same
     // replica. Without the remembered gap that op would set the floor to 4:8 and
     // hide 4:7 for ever.
-    vi.mocked(cachedOps).mockResolvedValueOnce([opPayload(4, 8)])
+    vi.mocked(cachedRows).mockResolvedValueOnce([{ payload: opPayload(4, 8), own: false }])
     const second = start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2))
     // Replica 4 is omitted from `since`, so the server replays it in full.
@@ -333,24 +378,39 @@ describe('createSyncClient checkpoint', () => {
     second.destroy()
   })
 
-  it('does not advance the watermark when the op was never queued', async () => {
-    // The oplog write is the only durable copy of an unsent op. If it fails, the
-    // op exists in memory only; advancing the watermark would tell the next sync
-    // "I already have it", and the server would never send it back.
-    vi.mocked(enqueue).mockRejectedValueOnce(new Error('quota exceeded'))
+  it('claims an op only once it is acked, never because it was sent', async () => {
+    // `send` is not a proof. If the oplog write failed, or the crash landed
+    // between the cache and the oplog, the op exists locally and the server has
+    // never heard of it. Claiming it would make the server skip it for ever, so
+    // the floor moves on the ack — and only on the ack.
     const client = start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
 
-    client.send(opPayload(7, 42))
+    client.send(opPayload(7, 1))
     await vi.waitFor(() => expect(vi.mocked(enqueue)).toHaveBeenCalled())
+    await new Promise((r) => setTimeout(r, 0))
 
     FakeWebSocket.instances[0].emitClose()
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
     expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
+
+    // Now the server confirms it: the floor may move.
+    FakeWebSocket.instances[1].emitMessage(frame(DISC_ACK, ackPayload([[7, 1]])))
+    await new Promise((r) => setTimeout(r, 0))
+    FakeWebSocket.instances[1].emitClose()
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(3), { timeout: 3000 })
+    expect(FakeWebSocket.instances[2].url).toBe(
+      `wss://sync.example.com/ws/doc-1?since=${encodeURIComponent('{"7":1}')}`,
+    )
   })
 
-  it('replays the cached op log and resumes from its watermark (reload resume)', async () => {
-    vi.mocked(cachedOps).mockResolvedValueOnce([opPayload(1, 10), opPayload(2, 5)])
+  it('replays the cached op log and resumes from the persisted floors (reload resume)', async () => {
+    vi.mocked(cachedRows).mockResolvedValueOnce([
+      { payload: opPayload(1, 10), own: false },
+      { payload: opPayload(2, 5), own: false },
+    ])
+    // What the previous session durably confirmed for those replicas.
+    vi.mocked(confirmedFloors).mockResolvedValueOnce({ 1: 10, 2: 5 })
 
     /** @type {Uint8Array[]} */
     const merged = []
@@ -358,15 +418,16 @@ describe('createSyncClient checkpoint', () => {
 
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
     expect(merged).toHaveLength(2)
-    // The watermark is rebuilt from the cached ops, so the first dial resumes
-    // from exactly the history the client actually holds.
+    // The first dial resumes from what the *server* has confirmed, not from the
+    // highest op in the cache: those are different questions, and only the
+    // first one is safe to skip ops on.
     expect(FakeWebSocket.instances[0].url).toBe(
       `wss://sync.example.com/ws/doc-1?since=${encodeURIComponent('{"1":10,"2":5}')}`,
     )
   })
 
   it('does not re-cache ops during replay', async () => {
-    vi.mocked(cachedOps).mockResolvedValueOnce([opPayload(1, 10)])
+    vi.mocked(cachedRows).mockResolvedValueOnce([{ payload: opPayload(1, 10), own: false }])
 
     start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
@@ -379,7 +440,10 @@ describe('createSyncClient checkpoint', () => {
     // Two cached ops (10 bytes each).
     const op1 = opPayload(1, 10)
     const op2 = opPayload(2, 5)
-    vi.mocked(cachedOps).mockResolvedValueOnce([op1, op2])
+    vi.mocked(cachedRows).mockResolvedValueOnce([
+      { payload: op1, own: false },
+      { payload: op2, own: false },
+    ])
 
     const onSyncStart = vi.fn()
     createSyncClient({
@@ -396,7 +460,7 @@ describe('createSyncClient checkpoint', () => {
   })
 
   it('does not size an empty cache replay', async () => {
-    vi.mocked(cachedOps).mockResolvedValueOnce([])
+    vi.mocked(cachedRows).mockResolvedValueOnce([])
 
     const onSyncStart = vi.fn()
     createSyncClient({
@@ -474,15 +538,17 @@ describe('createSyncClient checkpoint', () => {
     expect(onSuggestionChanged).toHaveBeenCalledWith({ suggestion_id: 's1', op: 'created' })
   })
 
-  it('caches our own op when sent', async () => {
+  it('caches our own op when sent, marked as ours', async () => {
     const client = start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
 
     client.send(opPayload(1, 10))
-    // The cache write happens after the op is durably queued (enqueue → claim →
-    // cache), so it lands on a later microtask.
+    // The provenance flag is what lets bootstrap tell "an op I authored and may
+    // still owe the server" from "an op the server gave me".
     await vi.waitFor(() =>
-      expect(vi.mocked(cacheOp)).toHaveBeenCalledWith('doc-1', expect.any(Uint8Array)),
+      expect(vi.mocked(cacheOp)).toHaveBeenCalledWith('doc-1', expect.any(Uint8Array), {
+        own: true,
+      }),
     )
   })
 

@@ -162,12 +162,11 @@ describe('no lost ops (fault matrix)', () => {
     expect(c.model.applied.has('4:4')).toBe(true)
   })
 
-  it.fails('I4: a lost LEAF op is repaired (KNOWN HOLE: needs coverage, not a watermark)', async () => {
-    // Every op is independent, so a missing one parks nothing at all — the
-    // watermark is the only thing that could notice, and it is a maximum.
-    // **KNOWN HOLE**: nothing in the client can see 5:2, because 5:3 applied
-    // and raised the watermark to 3. Needs a detector that compares *coverage*
-    // (a contiguous count) rather than a high-water mark.
+  it('I4: a lost LEAF op is repaired (nothing parks on it)', async () => {
+    // Every op is independent, so a missing one parks nothing at all. Only the
+    // *floor* can notice: 5:3 applies, but 5:2 was never confirmed, so the floor
+    // stays at 1 and the next `since` asks for 2. This is the case a max
+    // watermark hid for ever.
     for (const seq of [1, 2, 3]) hub.doc(docId).set(`5:${seq}`, op(5, seq, { dependsOn: null }))
     await cacheOp(docId, op(5, 1, { dependsOn: null }))
     await cacheOp(docId, op(5, 3, { dependsOn: null })) // 5:2 is missing
