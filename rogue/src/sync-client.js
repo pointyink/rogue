@@ -17,7 +17,14 @@
 // `disconnected`) are reported via the optional `onStatus` callback.
 
 import { enqueue, ackMany, pendingFor, pendingCount as pendingCountOp, clearDoc as clearOplogDoc } from './oplog.js'
-import { cacheOp, cachedOps, clearDoc as clearCacheDoc } from './doc-cache.js'
+import {
+  cacheOp,
+  cachedRows,
+  confirmedFloors,
+  raiseConfirmed,
+  setConfirmed,
+  clearDoc as clearCacheDoc,
+} from './doc-cache.js'
 import { advanceWatermark, mergeAndAdvance, appendSince } from './checkpoint.js'
 import * as multiOpV0 from '@pointyink/serde/multi_op_v0'
 import * as ackV0 from '@pointyink/serde/ack_v0'
@@ -41,6 +48,18 @@ function extractGroupId(payload) {
   const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength)
   const id = nodeIdV0.decode(view, 0)
   return `${id.replica_id}:${id.sequence}`
+}
+
+/**
+ * Split a payload's group id into its parts, or null when it is too short.
+ * @param {Uint8Array} payload
+ * @returns {{ replica: number, seq: number } | null}
+ */
+function groupParts(payload) {
+  if (payload.byteLength < nodeIdV0.SIZE) return null
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength)
+  const id = nodeIdV0.decode(view, 0)
+  return { replica: id.replica_id, seq: id.sequence }
 }
 
 /**
@@ -140,6 +159,33 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
   /** @type {Record<string, number>} */
   const watermark = {}
 
+  // Per-replica *confirmed floor*: the highest seq n such that the server is
+  // known to hold every op 1..n. This — not the watermark — is what `since` is
+  // built from, because the two answer different questions. The watermark says
+  // "the highest op I applied", which can be above a hole (so `since` would
+  // skip it) or above an op the server never received (so `since` would claim
+  // it). The floor only moves when the server has told us it holds the next op
+  // in the sequence: it streamed it, or it acked it. A hole freezes the floor,
+  // which is exactly what makes the next sync ask for the hole.
+  /** @type {Record<string, number>} */
+  const floors = {}
+
+  /**
+   * Move a replica's confirmed floor forward, if this is the next op.
+   * Persisted in the doc-cache DB so a reload resumes from it; a failed write
+   * only costs a re-download.
+   * @param {number} replica
+   * @param {number} seq
+   */
+  function confirm(replica, seq) {
+    if (!persist) return
+    if (seq !== (floors[replica] ?? 0) + 1) return
+    floors[replica] = seq
+    raiseConfirmed(docId, replica, seq).catch((err) =>
+      console.error('[sync-client] confirm write failed:', err),
+    )
+  }
+
   /** @type {Set<string>} */
   /** localStorage key for the repair state: which replicas need a full replay,
    *  and how many replays each has already had. The watermark itself is
@@ -204,6 +250,22 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
   let replaying = new Set()
 
   /**
+   * Stop re-requesting a hole that two full replays could not fill. The floor
+   * jumps to the highest op we have for that replica, which is the same
+   * acceptance the max-watermark made implicitly — but now it is an explicit,
+   * logged decision rather than the default.
+   * @param {string} replica
+   */
+  function giveUpOn(replica) {
+    const max = watermark[replica] ?? 0
+    if (max <= (floors[replica] ?? 0)) return
+    floors[replica] = max
+    setConfirmed(docId, Number(replica), max).catch((err) =>
+      console.error('[sync-client] floor save failed:', err),
+    )
+  }
+
+  /**
    * Note that an op's replica has a hole this client can't fill locally.
    *
    * The repair (omitting the replica from `since`) takes effect on the **next**
@@ -222,6 +284,7 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
     if (attempts >= MAX_REPAIR_REPLAYS) {
       // Known-unrepairable: its parent is not on the server. Leave it alone —
       // re-queuing it would restart the replay loop.
+      giveUpOn(replica)
       return
     }
     if (replaying.has(replica)) {
@@ -233,6 +296,7 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
         incomplete.delete(replica)
         saveRepairState()
         console.error('[sync-client] gap unresolved after full replay:', { docId, replica })
+        giveUpOn(replica)
         return
       }
       saveRepairState()
@@ -251,8 +315,10 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
     // decides whether we may claim it. Either way the replica is recorded: a
     // later op from it might merge fine and raise the floor past this hole, so
     // the gap has to be requested explicitly.
+    /** @type {ApplyOutcome} */
+    let outcome
     try {
-      const outcome = mergeAndAdvance(mergeOp, watermark, payload)
+      outcome = mergeAndAdvance(mergeOp, watermark, payload)
       // Only a *parked* op is a hole: 'deferred' merely means an IME owns the DOM
       // and it will be applied on composition end — flagging it as a gap would
       // burn the repair budget and log a false "unresolved".
@@ -264,9 +330,16 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
     completedBytes += payload.byteLength
     reportProgress(false)
     if (persist && cache) {
-      cacheOp(docId, payload).catch((err) =>
-        console.error('[sync-client] cache write failed:', err),
-      )
+      // An op the server streamed is one the server holds, so it may move the
+      // confirmed floor — but only once it is safely in the cache, or a reload
+      // would resume above an op it cannot replay.
+      cacheOp(docId, payload)
+        .then(() => {
+          if (outcome === 'parked' || outcome === 'deferred') return
+          const id = groupParts(payload)
+          if (id) confirm(id.replica, id.seq)
+        })
+        .catch((err) => console.error('[sync-client] cache write failed:', err))
     }
   }
 
@@ -344,6 +417,9 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
         try {
           const ack = ackV0.decode(body)
           const ids = ack.group_ids.map((id) => `${id.replica_id}:${id.sequence}`)
+          for (const group of ack.group_ids) {
+            confirm(group.replica_id, group.sequence)
+          }
           if (ids.length > 0) {
             ackMany(docId, ids).catch((err) =>
               console.error('[sync-client] ack drop failed:', err),
@@ -449,7 +525,7 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
     if (destroyed) return
 
     replaying = new Set(incomplete)
-    const url = appendSince(wsUrl, watermark, incomplete)
+    const url = appendSince(wsUrl, floors, incomplete)
     ws = new WebSocket(url, [WS_PROTOCOL, token])
     ws.binaryType = 'arraybuffer'
 
@@ -482,20 +558,24 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
   function send(payload) {
     opChain = opChain
       .then(async () => {
-        // Durability first: the oplog is the only copy of an op the server
-        // hasn't acked. If this write fails, the op lives only in memory, so it
-        // must not be claimed by the watermark — otherwise the next sync tells
-        // the server "I already have it" and nothing can bring it back.
-        // Cache first and independently: it is what a reload replays, so it
-        // must survive an oplog failure. Only the *claim* (the watermark) is
-        // gated on the oplog write succeeding.
+        // Cache first and independently of the oplog: the cache is what a
+        // reload replays, so it has to survive an oplog failure or the edit
+        // vanishes from the local doc. `own` marks it as ours, so bootstrap
+        // knows which cached ops it may have to re-send.
+        //
+        // Neither write claims anything: `since` is built from the confirmed
+        // floor, which moves only when this op's *ack* arrives. So a crash
+        // between the two writes leaves an op the server has not been told
+        // about — `reconcile` finds it at the next bootstrap and re-enqueues
+        // it — instead of an op the server is told we already have.
         if (persist) {
-          cacheOp(docId, payload).catch((err) =>
+          cacheOp(docId, payload, { own: true }).catch((err) =>
             console.error('[sync-client] cache write failed:', err),
           )
         }
         const id = extractGroupId(payload)
         if (id) await enqueue(docId, id, payload)
+        // The max applied, kept only for the give-up path in `noteGap`.
         advanceWatermark(watermark, payload)
         sendOpFrame(payload)
       })
@@ -535,8 +615,15 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
       connect()
       return
     }
+    // The floors first: `connect` below needs them, and they are what makes a
+    // reload resume instead of re-downloading.
     try {
-      const cached = await cachedOps(docId)
+      Object.assign(floors, await confirmedFloors(docId))
+    } catch (err) {
+      console.error('[sync-client] floor load failed:', err)
+    }
+    try {
+      const cached = (await cachedRows(docId)).map((r) => r.payload)
       if (cached.length > 0) {
         let cacheBytes = 0
         for (const payload of cached) {
@@ -561,7 +648,39 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
     } catch (err) {
       console.error('[sync-client] cache load failed:', err)
     }
+    // Ops the cache holds but the queue does not: an op that was applied
+    // locally, cached, and then never enqueued (a crash between the two writes
+    // in `send`, or a failed oplog write). Without this it would be replayed
+    // into the doc on every load and never leave the machine.
+    await reconcile()
     connect()
+  }
+
+  /**
+   * Re-enqueue our own cached ops that the server has not confirmed and the
+   * oplog no longer knows about. Idempotent: re-sending an op the server
+   * already holds is a no-op insert plus a second ack, which also repairs the
+   * floor. Only `own` rows are considered — another replica's op is the
+   * server's to re-send, not ours.
+   */
+  async function reconcile() {
+    if (!persist) return
+    try {
+      const [rows, pending] = await Promise.all([cachedRows(docId), pendingFor(docId)])
+      const queued = new Set(pending.map((p) => p.id))
+      for (const row of rows) {
+        if (!row.own) continue
+        const id = groupParts(row.payload)
+        if (!id) continue
+        if (id.seq <= (floors[id.replica] ?? 0)) continue
+        const groupId = `${id.replica}:${id.seq}`
+        if (queued.has(groupId)) continue
+        await enqueue(docId, groupId, row.payload)
+        queued.add(groupId)
+      }
+    } catch (err) {
+      console.error('[sync-client] reconcile failed:', err)
+    }
   }
 
   bootstrap()

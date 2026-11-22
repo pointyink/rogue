@@ -1,7 +1,7 @@
 // @ts-check
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { createSyncClient } from './sync-client.js'
-import { cacheOp, cachedOps } from './doc-cache.js'
+import { cacheOp, cachedRows } from './doc-cache.js'
 
 // No IndexedDB in this file: both stores are mocked so the test can assert
 // whether the sync client *chose* to persist.
@@ -15,6 +15,10 @@ vi.mock('./oplog.js', () => ({
 vi.mock('./doc-cache.js', () => ({
   cacheOp: vi.fn(() => Promise.resolve()),
   cachedOps: vi.fn(() => Promise.resolve([])),
+  cachedRows: vi.fn(() => Promise.resolve([])),
+  confirmedFloors: vi.fn(() => Promise.resolve({})),
+  raiseConfirmed: vi.fn(() => Promise.resolve(0)),
+  setConfirmed: vi.fn(() => Promise.resolve(0)),
   clearDoc: vi.fn(() => Promise.resolve()),
 }))
 
@@ -87,7 +91,7 @@ describe('createSyncClient persist option', () => {
 
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
     // Bootstrap must not read the cache.
-    expect(cachedOps).not.toHaveBeenCalled()
+    expect(cachedRows).not.toHaveBeenCalled()
 
     FakeWebSocket.instances[0].emitMessage(frame(3, opPayload(1, 1)))
     await new Promise((r) => setTimeout(r, 0))
@@ -104,7 +108,7 @@ describe('createSyncClient persist option', () => {
     })
 
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
-    expect(cachedOps).toHaveBeenCalled()
+    expect(cachedRows).toHaveBeenCalled()
 
     FakeWebSocket.instances[0].emitMessage(frame(3, opPayload(1, 1)))
     await vi.waitFor(() => expect(cacheOp).toHaveBeenCalled())
