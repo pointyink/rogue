@@ -456,6 +456,33 @@ describe('createSyncClient checkpoint', () => {
     expect(vi.mocked(cacheOp)).not.toHaveBeenCalled()
   })
 
+  it('yields between replay chunks so a big document cannot block the page', async () => {
+    // On iOS a long synchronous task is a *crash*, not a slow load: the page is
+    // killed for blocking the main thread. The replay is the longest task on the
+    // load path, so it has to hand the thread back regularly.
+    const count = 600
+    vi.mocked(cachedRows).mockResolvedValueOnce(
+      Array.from({ length: count }, (_, i) => ({ payload: opPayload(1, i + 1), own: false })),
+    )
+
+    /** @type {string[]} */
+    const order = []
+    start('wss://sync.example.com/ws/doc-1', 'doc-1', (p) => {
+      const seq = new DataView(p.buffer, p.byteOffset, p.byteLength).getUint32(2, true)
+      order.push(`merge:${seq}`)
+      return 'applied'
+    })
+
+    // Scheduled before the loop starts, so it can only run at a yield inside it.
+    setTimeout(() => order.push('tick'), 0)
+
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    expect(order.filter((x) => x.startsWith('merge:'))).toHaveLength(count)
+    const tick = order.indexOf('tick')
+    expect(tick, 'the replay never yielded').toBeGreaterThan(0)
+    expect(tick).toBeLessThan(order.lastIndexOf(`merge:${count}`))
+  })
+
   it('sizes the cache replay so it reports progress (reload warm start)', async () => {
     // Two cached ops (10 bytes each).
     const op1 = opPayload(1, 10)

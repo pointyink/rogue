@@ -2041,6 +2041,7 @@ export async function createRogueNode({
    * op keeps the final render invalid — still matches per-op rejection.
    */
   function recoverLoad() {
+    const startedAt = performance.now();
     // `appliedGroups` is kept in CRDT application order — the order `revertTail`
     // unwinds — so walk it as stored. Sorting by gid would break the 1:1
     // correspondence with the CRDT's `group_order` once dependent ops have been
@@ -2100,6 +2101,17 @@ export async function createRogueNode({
     } finally {
       booting = false;
     }
+
+    // Worth saying out loud: a walk-back re-renders and re-validates the whole
+    // document once per popped op, so a deep one is seconds — and it used to be
+    // silent, which is how an 8s load survived unnoticed. It also means ops were
+    // dropped from the render, so the host may want to surface it.
+    console.warn("[sync] load recovery", {
+      popped: popped.length,
+      rejected: rejected.size,
+      droppedGid: dirty ? dirty.gid : null,
+      ms: Math.round(performance.now() - startedAt),
+    });
   }
 
   // ── Observability ─────────────────────────────────────────────────────────
