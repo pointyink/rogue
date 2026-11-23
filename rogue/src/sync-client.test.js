@@ -244,7 +244,7 @@ describe('createSyncClient checkpoint', () => {
     // The cache is a rebuild accelerator; the oplog is the send queue. A failed
     // cache write must not stop the op being queued — but queued is not
     // confirmed, so `since` stays empty until an ack proves the server has it.
-    vi.mocked(cacheOp).mockRejectedValue(new Error('quota exceeded'))
+    vi.mocked(cacheOp).mockRejectedValueOnce(new Error('quota exceeded'))
     const client = start('wss://sync.example.com/ws/doc-1', 'doc-1', () => 'applied')
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
 
@@ -402,6 +402,26 @@ describe('createSyncClient checkpoint', () => {
     expect(FakeWebSocket.instances[2].url).toBe(
       `wss://sync.example.com/ws/doc-1?since=${encodeURIComponent('{"7":1}')}`,
     )
+  })
+
+  it('does not let an ack claim an op whose cache write failed', async () => {
+    // The ack says the server has it, but this client could not cache it. If
+    // the floor moved past it, a reload could not replay it *and* the server
+    // would never send it back — the edit would vanish from this device for
+    // ever. The floor stays below, so the next connect asks for it again.
+    vi.mocked(cacheOp).mockRejectedValueOnce(new Error('quota exceeded'))
+    const client = start('wss://sync.example.com/ws/doc-1', 'doc-1', () => 'applied')
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+
+    client.send(opPayload(7, 1))
+    await vi.waitFor(() => expect(vi.mocked(enqueue)).toHaveBeenCalled())
+
+    FakeWebSocket.instances[0].emitMessage(frame(DISC_ACK, ackPayload([[7, 1]])))
+    await new Promise((r) => setTimeout(r, 0))
+
+    FakeWebSocket.instances[0].emitClose()
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
+    expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
   })
 
   it('replays the cached op log and resumes from the persisted floors (reload resume)', async () => {
