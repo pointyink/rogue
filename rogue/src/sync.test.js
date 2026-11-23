@@ -1462,11 +1462,8 @@ describe('createRogueNode', () => {
 })
 
 describe('bad local edits', () => {
-  it('rejects an edit whose block the parser cannot represent, and emits no op', async () => {
-    // The DOM is built with APIs (execCommand, insertBefore, appendChild), which
-    // — unlike innerHTML parsing — will hold `<p><span><p>`. Serialising that
-    // mints an op whose whole document fails the round-trip on the next load,
-    // where it is dropped by a walk-back that costs seconds. Reject it here.
+  /** @returns {Promise<{el: HTMLElement, node: any, commits: Uint8Array[], badEdits: any[]}>} */
+  async function setup() {
     const el = makeEditor()
     /** @type {Uint8Array[]} */
     const commits = []
@@ -1478,10 +1475,58 @@ describe('bad local edits', () => {
       onCommit: (p) => commits.push(p),
       onBadEdit: (info) => badEdits.push(info),
     })
-
-    await type(el, '<p>ok</p>')
-    expect(commits).toHaveLength(1)
+    // Two blocks: an edit inside the first must not span the document, or
+    // `regionForVisBounds` (correctly) treats it as a whole-doc change.
+    await type(el, '<p>one</p><p>two</p>')
     commits.length = 0
+    return { el, node, commits, badEdits }
+  }
+
+  /** Wrap a paragraph inside a span inside itself — DOM APIs, so the parser never
+   *  sees it until it is serialised. `p span p` cannot be parsed.
+   *  @param {HTMLElement} el */
+  function nestParagraphInPlace(el) {
+    const p = /** @type {HTMLElement} */ (el.querySelector('p'))
+    const span = document.createElement('span')
+    const inner = document.createElement('p')
+    inner.textContent = 'bad'
+    span.appendChild(inner)
+    p.appendChild(span)
+  }
+
+  it('rejects a bad edit inside a block, and reverts just that block', async () => {
+    const { el, node, commits, badEdits } = await setup()
+
+    // Profiling marks a whole-document render as `innerhtml_set`; the scoped
+    // revert must not need one.
+    // @ts-ignore test-only hook
+    globalThis.__rogueProfile = true
+    performance.clearMeasures()
+
+    nestParagraphInPlace(el)
+    await flush()
+
+    const measures = performance.getEntriesByType('measure').map((m) => m.name)
+    // @ts-ignore test-only hook
+    globalThis.__rogueProfile = false
+
+    expect(commits).toHaveLength(0)
+    expect(badEdits).toHaveLength(1)
+    expect(badEdits[0].html).toContain('<span><p>')
+    expect(badEdits[0].normalized).not.toBe(badEdits[0].html)
+    expect(measures).not.toContain('innerhtml_set')
+
+    expect(el.querySelector('p p')).toBeNull()
+    expect(node.getString()).toBe('<p>one</p><p>two</p>')
+
+    // A normal edit still commits afterwards.
+    await type(el, '<p>one</p><p>two</p><p>three</p>')
+    expect(commits).toHaveLength(1)
+    expect(node.getString()).toBe('<p>one</p><p>two</p><p>three</p>')
+  })
+
+  it('rejects a bad whole-doc edit (a new block at the root) too', async () => {
+    const { el, node, commits, badEdits } = await setup()
 
     const outer = document.createElement('p')
     const span = document.createElement('span')
@@ -1494,15 +1539,7 @@ describe('bad local edits', () => {
 
     expect(commits).toHaveLength(0)
     expect(badEdits).toHaveLength(1)
-    expect(badEdits[0].html).toContain('<p><span><p>')
-    expect(badEdits[0].normalized).not.toBe(badEdits[0].html)
-    // The edit is gone from both the DOM and the document.
     expect(el.querySelector('p p')).toBeNull()
-    expect(node.getString()).toBe('<p>ok</p>')
-
-    // A normal edit still works afterwards.
-    await type(el, '<p>ok</p><p>again</p>')
-    expect(commits).toHaveLength(1)
-    expect(node.getString()).toBe('<p>ok</p><p>again</p>')
+    expect(node.getString()).toBe('<p>one</p><p>two</p>')
   })
 })

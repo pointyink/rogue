@@ -1266,8 +1266,9 @@ export async function createRogueNode({
    * @param {string} crdtHtml @param {string} domHtml @param {number} offset
    * @param {{ minIx: number, maxIx: number } | null} visBounds the changed span,
    *   pre-edit; null means the whole document changed.
+   * @param {LocalSync | null} [range] the scoped DOM region, when there is one
    */
-  function applyDiff(crdtHtml, domHtml, offset, visBounds) {
+  function applyDiff(crdtHtml, domHtml, offset, visBounds, range = null) {
     if (crdtHtml === domHtml) return;
     const diffs = timed("dmp_diff", () => dmp.diff_main(crdtHtml, domHtml));
     // Span of the diff in the CRDT's pre-edit vis coordinates — a conservative
@@ -1347,10 +1348,22 @@ export async function createRogueNode({
           appliedKeys.delete(gidKey(gid));
           untrackLast();
           maxGid = topGid();
-          // A full render is the safe answer. This could be a scoped revert of
-          // just the block (the levels are already known) the way undo does it;
-          // worth doing only if bad edits turn out not to be rare.
-          dom.forceFullRender();
+          // Put the block back the way the out-of-order path restores its tail:
+          // the fenceposts around the changed root-child are known, so only that
+          // block needs re-rendering. The whole document is the fallback — the
+          // scoped render refuses if the restored html does not validate, and a
+          // stale rope throws.
+          try {
+            // The rope still describes the pre-edit DOM (a local edit resyncs it
+            // in `finishSync`, which this path skips), so bring it up to date
+            // before asking the renderer to swap the block.
+            if (range) dom.resyncRope(range);
+            if (!topScope || !dom.renderOp([topScope])) dom.forceFullRender();
+          } catch (err) {
+            console.error("[sync] scoped revert failed — rebuilding the document", err);
+            dom.forceFullRender();
+          }
+          restoreCursor(cursorIds);
           console.error("[sync] local edit rejected: it does not round-trip", {
             gid,
             html: bad.html.slice(0, 300),
@@ -1451,10 +1464,13 @@ export async function createRogueNode({
       );
     }
     if (
-      applyDiff(crdtSub, domSub, range.startVisIx, {
-        minIx: range.startVisIx,
-        maxIx: range.endVisIx,
-      }) === false
+      applyDiff(
+        crdtSub,
+        domSub,
+        range.startVisIx,
+        { minIx: range.startVisIx, maxIx: range.endVisIx },
+        range,
+      ) === false
     ) {
       return false;
     }
