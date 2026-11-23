@@ -36,6 +36,14 @@ const DISC_JSON_ENVELOPE = 5
 
 const FRAME_HEADER_BYTES = 2 + 4 // u16 disc + u32 len for variable types
 
+// How many cached ops to merge before yielding to the event loop. The replay is
+// a synchronous merge loop, and on a phone a few thousand ops in one task is
+// long enough for Safari to kill the tab outright — the same thing a long loop
+// looks like to the watchdog. Yielding lets it paint and keeps the timer alive;
+// the chunk is a count rather than a time budget so the yield cost stays
+// predictable (~n/250 macrotasks, each clamped to ~4 ms after nesting).
+const REPLAY_CHUNK_OPS = 250
+
 /**
  * Extract the group NodeId from a multi_op_v0 payload (first 6 bytes are the
  * node_id_v0 of the group). Returns "replica:sequence" as the stable id used
@@ -636,13 +644,21 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
         completedBytes = 0
         onSyncStart?.(cacheBytes)
       }
+      let replayed = 0
       for (const payload of cached) {
+        if (destroyed) return
         try {
           // Replay merges + advances the watermark, but the op is already in
           // the cache — mergeAndAccount(cache=false) skips re-caching.
           mergeAndAccount(payload, false)
         } catch (err) {
           console.error('[sync-client] cache replay failed:', err)
+        }
+        // Hand the main thread back regularly, or a large document is a
+        // synchronous multi-second task — which iOS treats as a crash, not a
+        // slow load.
+        if (++replayed % REPLAY_CHUNK_OPS === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 0))
         }
       }
     } catch (err) {
