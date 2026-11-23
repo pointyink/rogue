@@ -171,6 +171,16 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
   const floors = {}
 
   /**
+   * Group ids whose cache write failed. An ack must not advance the floor for
+   * one of these: the server has the op, but this client could not cache it, so
+   * after a reload it cannot replay it — and if `since` moved past it the server
+   * would never send it back. Leaving the floor below makes the server re-send
+   * it on the next connect, which re-caches and confirms it.
+   * @type {Set<string>}
+   */
+  const uncached = new Set()
+
+  /**
    * Move a replica's confirmed floor forward, if this is the next op.
    * Persisted in the doc-cache DB so a reload resumes from it; a failed write
    * only costs a re-download.
@@ -418,6 +428,11 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
           const ack = ackV0.decode(body)
           const ids = ack.group_ids.map((id) => `${id.replica_id}:${id.sequence}`)
           for (const group of ack.group_ids) {
+            const gid = `${group.replica_id}:${group.sequence}`
+            // Cached already: the floor may move. Not cached (this write
+            // failed): leave the floor below it, so the next connect re-sends
+            // it and the cache is repaired. The oplog row still goes.
+            if (uncached.delete(gid)) continue
             confirm(group.replica_id, group.sequence)
           }
           if (ids.length > 0) {
@@ -568,12 +583,20 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
         // between the two writes leaves an op the server has not been told
         // about — `reconcile` finds it at the next bootstrap and re-enqueues
         // it — instead of an op the server is told we already have.
-        if (persist) {
-          cacheOp(docId, payload, { own: true }).catch((err) =>
-            console.error('[sync-client] cache write failed:', err),
-          )
-        }
+        //
+        // Awaited, not fired and forgotten: the ack can arrive at any moment
+        // after `sendOpFrame`, and the ack path advances the floor. If the
+        // write were still in flight (or had failed) the floor would claim an
+        // op this client cannot replay — the stale-cache hole, one layer up.
         const id = extractGroupId(payload)
+        if (persist) {
+          try {
+            await cacheOp(docId, payload, { own: true })
+          } catch (err) {
+            console.error('[sync-client] cache write failed:', err)
+            if (id) uncached.add(id)
+          }
+        }
         if (id) await enqueue(docId, id, payload)
         // The max applied, kept only for the give-up path in `noteGap`.
         advanceWatermark(watermark, payload)
