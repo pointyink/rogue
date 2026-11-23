@@ -1460,3 +1460,49 @@ describe('createRogueNode', () => {
   })
 
 })
+
+describe('bad local edits', () => {
+  it('rejects an edit whose block the parser cannot represent, and emits no op', async () => {
+    // The DOM is built with APIs (execCommand, insertBefore, appendChild), which
+    // — unlike innerHTML parsing — will hold `<p><span><p>`. Serialising that
+    // mints an op whose whole document fails the round-trip on the next load,
+    // where it is dropped by a walk-back that costs seconds. Reject it here.
+    const el = makeEditor()
+    /** @type {Uint8Array[]} */
+    const commits = []
+    /** @type {{html: string, normalized: string}[]} */
+    const badEdits = []
+    const node = await createRogueNode({
+      element: el,
+      replicaId: 7,
+      onCommit: (p) => commits.push(p),
+      onBadEdit: (info) => badEdits.push(info),
+    })
+
+    await type(el, '<p>ok</p>')
+    expect(commits).toHaveLength(1)
+    commits.length = 0
+
+    const outer = document.createElement('p')
+    const span = document.createElement('span')
+    const inner = document.createElement('p')
+    inner.textContent = 'bad'
+    span.appendChild(inner)
+    outer.appendChild(span)
+    el.appendChild(outer)
+    await flush()
+
+    expect(commits).toHaveLength(0)
+    expect(badEdits).toHaveLength(1)
+    expect(badEdits[0].html).toContain('<p><span><p>')
+    expect(badEdits[0].normalized).not.toBe(badEdits[0].html)
+    // The edit is gone from both the DOM and the document.
+    expect(el.querySelector('p p')).toBeNull()
+    expect(node.getString()).toBe('<p>ok</p>')
+
+    // A normal edit still works afterwards.
+    await type(el, '<p>ok</p><p>again</p>')
+    expect(commits).toHaveLength(1)
+    expect(node.getString()).toBe('<p>ok</p><p>again</p>')
+  })
+})

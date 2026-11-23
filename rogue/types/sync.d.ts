@@ -55,6 +55,15 @@ export function nodeSpan(rope: NonNullable<ReturnType<typeof buildRope>>, node: 
  * @property {() => void} [onDocTooLarge] Called when an edit can't be applied
  *   because the document has reached its storage capacity. The edit is reverted
  *   (the CRDT is left untouched).
+ * @property {(info: { html: string, normalized: string }) => void} [onBadEdit]
+ *   Called when a local edit would mint an op whose HTML the browser cannot
+ *   represent — it does not round-trip through `innerHTML`. Such an op renders
+ *   as an invalid document on every subsequent load, where it is dropped by a
+ *   walk-back, so it is discarded instead: the CRDT is reverted, the DOM is
+ *   re-rendered, and **no op is emitted**. `html` is what would have been sent,
+ *   `normalized` is what the parser makes of it — together they are the bug
+ *   report. This can only be a host bug: the editor built a tree with DOM APIs
+ *   that the parser would never produce from the same markup.
  * @property {{ ops?: number, opBytes?: number, crdtBytes?: number }} [sizeWarn]
  *   Soft size thresholds. When a configured metric crosses its threshold,
  *   `onSizeWarning` fires — once per crossing, re-armed when the metric falls
@@ -159,7 +168,7 @@ export function nodeSpan(rope: NonNullable<ReturnType<typeof buildRope>>, node: 
  * @param {RogueNodeOptions} options
  * @returns {Promise<RogueNode>}
  */
-export function createRogueNode({ element: editorRoot, replicaId, onCommit, maxOpBytes, onOpTooLarge, onDocTooLarge, sizeWarn, onSizeWarning, onError, onChange, paste, doc, win, serializeNode, omitNode, unwrapNode, opaqueNode, validateHtml, }: RogueNodeOptions): Promise<RogueNode>;
+export function createRogueNode({ element: editorRoot, replicaId, onCommit, maxOpBytes, onOpTooLarge, onDocTooLarge, onBadEdit, sizeWarn, onSizeWarning, onError, onChange, paste, doc, win, serializeNode, omitNode, unwrapNode, opaqueNode, validateHtml, }: RogueNodeOptions): Promise<RogueNode>;
 export type RogueNodeOptions = {
     /**
      * The container the engine renders into and
@@ -198,6 +207,20 @@ export type RogueNodeOptions = {
      * (the CRDT is left untouched).
      */
     onDocTooLarge?: (() => void) | undefined;
+    /**
+     * Called when a local edit would mint an op whose HTML the browser cannot
+     * represent — it does not round-trip through `innerHTML`. Such an op renders
+     * as an invalid document on every subsequent load, where it is dropped by a
+     * walk-back, so it is discarded instead: the CRDT is reverted, the DOM is
+     * re-rendered, and **no op is emitted**. `html` is what would have been sent,
+     * `normalized` is what the parser makes of it — together they are the bug
+     * report. This can only be a host bug: the editor built a tree with DOM APIs
+     * that the parser would never produce from the same markup.
+     */
+    onBadEdit?: ((info: {
+        html: string;
+        normalized: string;
+    }) => void) | undefined;
     /**
      * Soft size thresholds. When a configured metric crosses its threshold,
      * `onSizeWarning` fires — once per crossing, re-armed when the metric falls
