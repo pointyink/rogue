@@ -108,6 +108,15 @@ export function nodeSpan(rope, node) {
  * @property {() => void} [onDocTooLarge] Called when an edit can't be applied
  *   because the document has reached its storage capacity. The edit is reverted
  *   (the CRDT is left untouched).
+ * @property {(info: { html: string, normalized: string }) => void} [onBadEdit]
+ *   Called when a local edit would mint an op whose HTML the browser cannot
+ *   represent — it does not round-trip through `innerHTML`. Such an op renders
+ *   as an invalid document on every subsequent load, where it is dropped by a
+ *   walk-back, so it is discarded instead: the CRDT is reverted, the DOM is
+ *   re-rendered, and **no op is emitted**. `html` is what would have been sent,
+ *   `normalized` is what the parser makes of it — together they are the bug
+ *   report. This can only be a host bug: the editor built a tree with DOM APIs
+ *   that the parser would never produce from the same markup.
  * @property {{ ops?: number, opBytes?: number, crdtBytes?: number }} [sizeWarn]
  *   Soft size thresholds. When a configured metric crosses its threshold,
  *   `onSizeWarning` fires — once per crossing, re-armed when the metric falls
@@ -223,6 +232,7 @@ export async function createRogueNode({
   maxOpBytes = 8 * 1024 * 1024,
   onOpTooLarge,
   onDocTooLarge,
+  onBadEdit,
   sizeWarn,
   onSizeWarning,
   onError,
@@ -1214,8 +1224,51 @@ export async function createRogueNode({
     return { payload: readBytes(), nextCa: readCa() };
   }
 
-  /** @param {string} crdtHtml @param {string} domHtml @param {number} offset */
-  function applyDiff(crdtHtml, domHtml, offset) {
+  /** The largest applied group id, for `maxGid` after a revert.
+   *  @returns {Gid | null} */
+  function topGid() {
+    /** @type {Gid | null} */
+    let g = null;
+    for (const a of appliedGroups) if (!g || cmpGid(a.gid, g) > 0) g = a.gid;
+    return g;
+  }
+
+  /**
+   * Would this payload render a document the parser cannot represent?
+   *
+   * Local ops are captured by serialising the live DOM — and the DOM is built
+   * with APIs (`execCommand`, `insertBefore`, `appendChild`) that, unlike
+   * `innerHTML` parsing, will happily hold `<p><span><p>`. Serialising that
+   * mints an op whose *whole document* fails the round-trip on the next load,
+   * where `recoverLoad` pays for it by dropping ops and re-rendering (seconds).
+   *
+   * The check has to be at the editor root's child, not the immediate parent:
+   * fragment parsing uses only the context element, so a fragment validated in
+   * a clone of its parent passes even when the aggregate cannot be parsed.
+   * @param {OpSync | null} scope the editor root's child that changed
+   * @returns {{ html: string, normalized: string } | null} null when it is fine
+   */
+  function invalidEdit(scope) {
+    /** @type {string | null} */
+    let html = null;
+    if (scope) {
+      const ids = crdt.contentRange(scope);
+      if (ids) html = crdt.render(ids.startId, ids.endId);
+    }
+    if (html === null) html = crdt.render();
+    if (html === null) return null;
+    const probe = /** @type {Element} */ (editorRoot.cloneNode(false));
+    probe.innerHTML = html;
+    return probe.innerHTML === html ? null : { html, normalized: probe.innerHTML };
+  }
+
+  /**
+   * @param {string} crdtHtml @param {string} domHtml @param {number} offset
+   * @param {{ minIx: number, maxIx: number } | null} visBounds the changed span,
+   *   pre-edit; null means the whole document changed.
+   * @param {LocalSync | null} [range] the scoped DOM region, when there is one
+   */
+  function applyDiff(crdtHtml, domHtml, offset, visBounds, range = null) {
     if (crdtHtml === domHtml) return;
     const diffs = timed("dmp_diff", () => dmp.diff_main(crdtHtml, domHtml));
     // Span of the diff in the CRDT's pre-edit vis coordinates — a conservative
@@ -1235,6 +1288,12 @@ export async function createRogueNode({
         return false;
       }
     }
+    // The block that this edit lands in, captured before the CRDT moves: the
+    // fencepost ids are stable, and this is the level the parser can judge (a
+    // fragment in a clone of its parent cannot see an un-parseable ancestor).
+    const levels = !loading && visBounds ? dom.regionForVisBounds(visBounds) : null;
+    const topScope = levels && levels.length > 0 ? levels[levels.length - 1] : null;
+
     const applied = timed("wasm_batch", () => {
       rogue_begin_batch();
       let pos = offset;
@@ -1276,7 +1335,44 @@ export async function createRogueNode({
       }
       if (committed) {
         const payload = readBytes();
-        trackApplied(gidOf(payload), payload);
+        const gid = gidOf(payload);
+        trackApplied(gid, payload);
+
+        // Never emit an op the parser cannot represent. One such op makes every
+        // later load fail the whole-document validation and walk back over the
+        // log — seconds per load, ops dropped silently. The edit is discarded
+        // and the host is told; this is always a host bug, never user content.
+        const bad = loading ? null : invalidEdit(topScope);
+        if (bad) {
+          crdt.revertTail(1);
+          appliedKeys.delete(gidKey(gid));
+          untrackLast();
+          maxGid = topGid();
+          // Put the block back the way the out-of-order path restores its tail:
+          // the fenceposts around the changed root-child are known, so only that
+          // block needs re-rendering. The whole document is the fallback — the
+          // scoped render refuses if the restored html does not validate, and a
+          // stale rope throws.
+          try {
+            // The rope still describes the pre-edit DOM (a local edit resyncs it
+            // in `finishSync`, which this path skips), so bring it up to date
+            // before asking the renderer to swap the block.
+            if (range) dom.resyncRope(range);
+            if (!topScope || !dom.renderOp([topScope])) dom.forceFullRender();
+          } catch (err) {
+            console.error("[sync] scoped revert failed — rebuilding the document", err);
+            dom.forceFullRender();
+          }
+          restoreCursor(cursorIds);
+          console.error("[sync] local edit rejected: it does not round-trip", {
+            gid,
+            html: bad.html.slice(0, 300),
+            normalized: bad.normalized.slice(0, 300),
+          });
+          onBadEdit?.(bad);
+          return false;
+        }
+
         onCommit?.(payload);
         maybeWarnSize();
         lastChangeRange = { minIx: offset, maxIx: offset + span };
@@ -1367,7 +1463,17 @@ export async function createRogueNode({
         JSON.stringify(domSub),
       );
     }
-    if (applyDiff(crdtSub, domSub, range.startVisIx) === false) return false;
+    if (
+      applyDiff(
+        crdtSub,
+        domSub,
+        range.startVisIx,
+        { minIx: range.startVisIx, maxIx: range.endVisIx },
+        range,
+      ) === false
+    ) {
+      return false;
+    }
     // Only this region's DOM changed, so patch just its rope span (O(log n + k))
     // instead of rebuilding the whole document's rope.
     finishSync(() => dom.resyncRope(range));
@@ -1394,7 +1500,7 @@ export async function createRogueNode({
       rebuildRope();
       return;
     }
-    if (applyDiff(rogueHtml, editorHtml, 0) === false) return;
+    if (applyDiff(rogueHtml, editorHtml, 0, null) === false) return;
     finishSync(rebuildRope);
   }
 
