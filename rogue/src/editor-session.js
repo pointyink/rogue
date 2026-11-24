@@ -17,7 +17,7 @@ import { createSuggestions } from './suggestions.js'
 import { resolveReplicaId, syncBaseUrlFromWsUrl } from './replica.js'
 import { createSyncClient } from './sync-client.js'
 import { createDocBus } from './doc-bus.js'
-import { rejectedGids, addRejectedGid, cachedOpsCount } from './doc-cache.js'
+import { rejectedGids, addRejectedGid } from './doc-cache.js'
 
 /**
  * Resolve `p`, or `fallback` after `ms`. For a read that is an optimisation: a
@@ -172,8 +172,7 @@ export async function createEditorSession({
   /** @param {string} id @returns {Promise<string[]>} */
   async function seededVerdicts(id) {
     try {
-      const count = await cachedOpsCount(id)
-      return await rejectedGids(id, { count })
+      return await rejectedGids(id)
     } catch {
       return []
     }
@@ -197,17 +196,11 @@ export async function createEditorSession({
     rejectedOps: seededRejects,
     onRejectOps: (gids) => {
       if (!docId) return
-      // The verdict is only valid for the cache as it is now; a later op makes
-      // it stale and the load re-examines the op instead of skipping it.
-      cachedOpsCount(docId)
-        .then((count) => {
-          for (const gid of gids) {
-            addRejectedGid(docId, gid, { count }).catch((err) =>
-              console.error('[editor-session] rejected op not remembered:', err),
-            )
-          }
-        })
-        .catch((err) => console.error('[editor-session] rejected op not remembered:', err))
+      for (const gid of gids) {
+        addRejectedGid(docId, gid).catch((err) =>
+          console.error('[editor-session] rejected op not remembered:', err),
+        )
+      }
     },
     sizeWarn,
     onSizeWarning,

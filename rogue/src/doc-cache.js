@@ -311,47 +311,32 @@ export async function setConfirmed(docId, replica, seq) {
 }
 
 /**
- * How many ops this doc has cached. Cheap enough to read on every load; used to
- * tell "nothing has changed since this verdict" from "the document grew".
- * @param {string} docId
- * @returns {Promise<number>}
- */
-export async function cachedOpsCount(docId) {
-  const db = await openDB()
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, 'readonly')
-    const range = IDBKeyRange.bound([docId], [docId, []])
-    const req = tx.objectStore(STORE).count(range)
-    req.onsuccess = () => resolve(Number(req.result) || 0)
-    req.onerror = () => reject(req.error)
-  })
-}
-
-/**
  * Ops this engine has decided it cannot render, as `"replica:seq"` keys.
  *
  * A load that walks back, or an op rejected on apply, is a permanent verdict for
  * *this* engine version but not necessarily for the next one, so the version
  * travels with the verdict and a mismatch is ignored (the op is retried).
  *
- * A verdict is also keyed by the number of cached ops it was formed against. A
- * walk-back rejection is *context-dependent* — the engine's contract is that an
- * op invalid at its own prefix may be valid once later ops arrive (see
- * docs/plan-load-walkback.md) — so a document that has grown since the verdict
- * must be re-examined, not skipped. That matters: a paste whose opening and
- * closing tags arrive in different sessions would otherwise stay truncated.
+ * A verdict is **not** keyed by the cache size. It was, to catch a rejection that
+ * only held for a particular prefix (an op invalid alone but valid once later
+ * ops arrive — see docs/plan-load-walkback.md), but the size is read while the
+ * last cache writes are still in flight, so the recorded number is routinely a
+ * few short. The next load then sees a "changed" document, ignores the verdict,
+ * walks back, and records another slightly-wrong number: it never converges, and
+ * the document pays the walk-back on every load. Correctness is not at stake —
+ * a stale verdict can only hide an op that would now render — and re-examining
+ * is a separate, cheap job once the document is up, not a reason to skip the
+ * fast path for ever.
  *
  * Keyed by gid alone, so a doc deleted and re-created with the same id while
  * this client was offline would inherit a stale verdict. `clearDoc` drops them
  * on an observed deletion; the offline-recreate window is the only gap.
  * @param {string} docId
- * @param {{ count?: number, version?: string }} [at] the cache size the verdict
- *   applies to; omit to read regardless of size
+ * @param {{ version?: string }} [at]
  * @returns {Promise<string[]>}
  */
 export async function rejectedGids(docId, at = {}) {
   const version = at.version ?? REJECT_VERSION
-  const count = at.count === undefined ? null : at.count
   const db = await openRejectedDB()
   return new Promise((resolve, reject) => {
     const tx = db.transaction(REJECTED, 'readonly')
@@ -361,7 +346,6 @@ export async function rejectedGids(docId, at = {}) {
       const out = []
       for (const row of /** @type {any[]} */ (req.result) || []) {
         if (row.version !== version) continue
-        if (count !== null && Number(row.count) !== count) continue
         out.push(String(row.gid))
       }
       resolve(out)
@@ -375,19 +359,13 @@ export async function rejectedGids(docId, at = {}) {
  * the walk-back again. Idempotent.
  * @param {string} docId
  * @param {string} gid `"replica:seq"`
- * @param {{ count?: number, version?: string }} [at] the cache size the verdict
- *   was formed against
+ * @param {{ version?: string }} [at]
  */
 export async function addRejectedGid(docId, gid, at = {}) {
   const db = await openRejectedDB()
   await new Promise((resolve, reject) => {
     const tx = db.transaction(REJECTED, 'readwrite')
-    tx.objectStore(REJECTED).put({
-      docId,
-      gid,
-      version: at.version ?? REJECT_VERSION,
-      count: at.count,
-    })
+    tx.objectStore(REJECTED).put({ docId, gid, version: at.version ?? REJECT_VERSION })
     tx.oncomplete = () => resolve(undefined)
     tx.onerror = () => reject(tx.error)
   })

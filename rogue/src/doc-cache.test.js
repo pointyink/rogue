@@ -10,7 +10,6 @@ import {
   setConfirmed,
   rejectedGids,
   addRejectedGid,
-  cachedOpsCount,
   clearDoc,
 } from './doc-cache.js'
 import * as nodeIdV0 from '@pointyink/serde/node_id_v0'
@@ -160,29 +159,30 @@ describe('rejected ops', () => {
     // A rejected op is a claim about *this* engine, so a validator fix must get
     // to look at it again rather than keep it hidden for ever.
     const doc = 'reject-versioned'
-    await addRejectedGid(doc, '1:1', { count: 0, version: '0.4.0' })
+    await addRejectedGid(doc, '1:1', { version: '0.4.0' })
     expect(await rejectedGids(doc, { version: '0.4.0' })).toEqual(['1:1'])
     expect(await rejectedGids(doc, { version: '0.4.1' })).toEqual([])
   })
 
-  it('ignores a verdict once the document has grown', async () => {
-    // A walk-back rejection is context-dependent: the op may render fine once
-    // later ops arrive (a paste split across sessions). A verdict only applies to
-    // the cache it was formed against.
+  it('applies a verdict regardless of how much the document has grown', async () => {
+    // It used to be keyed on the cache size, to re-examine an op invalid alone but
+    // valid once later ops arrive. But that size is read while the last cache
+    // writes are still in flight, so it is routinely recorded a few short: the
+    // verdict never matched, every load walked back again, and each load found one
+    // more bad op. Correctness does not need the count (a stale verdict can only
+    // hide an op that would now render); re-examining is a separate, cheap job.
     const doc = 'reject-grown'
     await cacheOp(doc, opPayload(1, 1))
+    await addRejectedGid(doc, '1:1')
     await cacheOp(doc, opPayload(1, 2))
-    expect(await cachedOpsCount(doc)).toBe(2)
-    await addRejectedGid(doc, '1:2', { count: 2 })
-    expect(await rejectedGids(doc, { count: 2 })).toEqual(['1:2'])
     await cacheOp(doc, opPayload(1, 3))
-    expect(await rejectedGids(doc, { count: 3 })).toEqual([])
+    expect(await rejectedGids(doc)).toEqual(['1:1'])
   })
 
   it('clearDoc drops the verdict with the history', async () => {
     const doc = 'reject-clear'
     await cacheOp(doc, opPayload(1, 1))
-    await addRejectedGid(doc, '1:1', { count: 1 })
+    await addRejectedGid(doc, '1:1')
     await clearDoc(doc)
     expect(await rejectedGids(doc)).toEqual([])
   })
