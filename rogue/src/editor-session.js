@@ -74,6 +74,7 @@ function withTimeout(p, ms, fallback) {
  *   onCommit?: (payload: Uint8Array) => void,
  *   onOpTooLarge?: (bytes: number, limit: number) => void,
  *   onDocTooLarge?: () => void,
+ *   onBadEdit?: (info: { html: string, normalized: string }) => void,
  *   onSyncStart?: (bytes: number) => void,
  *   sizeWarn?: { ops?: number, opBytes?: number, crdtBytes?: number },
  *   onSizeWarning?: (stats: import('./sync.js').NodeStats, key: 'ops' | 'opBytes' | 'crdtBytes') => void,
@@ -121,6 +122,7 @@ export async function createEditorSession({
   onCommit,
   onOpTooLarge,
   onDocTooLarge,
+  onBadEdit,
   onSyncStart,
   sizeWarn,
   onSizeWarning,
@@ -191,6 +193,7 @@ export async function createEditorSession({
     paste,
     onOpTooLarge,
     onDocTooLarge,
+    onBadEdit,
     rejectedOps: seededRejects,
     onRejectOps: (gids) => {
       if (!docId) return
