@@ -35,6 +35,14 @@ const DB_NAME = 'rogue-doc-cache'
 const DB_VERSION = 3
 const STORE = 'ops'
 const CONFIRMED = 'confirmed'
+
+// Rejections live in their own database, on purpose. Adding a store to the cache
+// DB means *requesting an upgrade*, and an upgrade waits — in some browsers
+// without ever firing `blocked` — while any other tab still holds a connection.
+// That is a production outage, not a theoretical one: 0.4.1 bumped the cache and
+// every cache call in a second tab timed out. A brand-new database has no older
+// connection to wait for, so this one can never wedge.
+const REJECTED_DB = 'rogue-doc-rejected'
 const REJECTED = 'rejected'
 
 // Bump when the HTML validator or the recovery policy changes. A rejected op is
@@ -42,75 +50,105 @@ const REJECTED = 'rejected'
 // a new engine must be allowed to look again — a stricter-then-fixed validator
 // should not keep an op hidden for ever. Stored with each row and compared on
 // read; stale rows are simply ignored.
-const REJECT_VERSION = '0.4.1'
+const REJECT_VERSION = '0.4.3'
 
 /** @type {Promise<IDBDatabase> | null} */
 let dbPromise = null
+/** @type {Promise<IDBDatabase> | null} */
+let rejectedDbPromise = null
+
+/** @param {IDBDatabase} db */
+function closeOnVersionChange(db) {
+  db.onversionchange = () => db.close()
+}
+
+/**
+ * Open a database **without requesting a version**, creating the schema only when
+ * there is none. A versionless open never waits on another connection; the only
+ * upgrading open is the one that creates a brand-new database, which by
+ * definition has no other connection to wait for.
+ * @param {string} name
+ * @param {string} store
+ * @param {number} version
+ * @param {(db: IDBDatabase) => void} create
+ * @returns {Promise<IDBDatabase>}
+ */
+function openExisting(name, store, version, create) {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(name)
+    req.onerror = () => reject(req.error ?? new Error(`${name} open failed`))
+    req.onsuccess = () => {
+      const db = req.result
+      if (db.objectStoreNames.contains(store)) {
+        closeOnVersionChange(db)
+        resolve(db)
+        return
+      }
+      // No schema yet. If the database is *empty* — the versionless open just
+      // created it at v1 — it has to be removed first: opening at `version` would
+      // be a no-op upgrade (1 === 1) and never fire `onupgradeneeded`.
+      const empty = db.objectStoreNames.length === 0
+      db.close()
+      recreate(empty).then(resolve, reject)
+    }
+
+    /** @param {boolean} empty @returns {Promise<IDBDatabase>} */
+    async function recreate(empty) {
+      if (empty) {
+        await new Promise((done) => {
+          const del = indexedDB.deleteDatabase(name)
+          del.onsuccess = del.onerror = del.onblocked = () => done(undefined)
+        })
+      }
+      return new Promise((res, rej) => {
+        const up = indexedDB.open(name, version)
+        up.onupgradeneeded = () => create(up.result)
+        up.onerror = () => rej(up.error ?? new Error(`${name} create failed`))
+        up.onsuccess = () => {
+          closeOnVersionChange(up.result)
+          res(up.result)
+        }
+      })
+    }
+  })
+}
 
 function openDB() {
   if (dbPromise) return dbPromise
-  /** @type {Promise<IDBDatabase>} */
-  const p = new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION)
-    let settled = false
-    /** A blocked or broken open must FAIL, never hang: every caller awaits this
-     *  before syncing, so a request that never settles is a blank editor.
-     *  @param {Error} err */
-    const fail = (err) => {
-      if (settled) return
-      settled = true
-      clearTimeout(deadline)
-      reject(err)
+  const p = openExisting(DB_NAME, STORE, DB_VERSION, (db) => {
+    if (!db.objectStoreNames.contains(STORE)) {
+      db.createObjectStore(STORE, { keyPath: ['docId', 'seq', 'replica'] })
     }
-    req.onupgradeneeded = () => {
-      // A real migration may take a while on a slow device; it is progress, not a
-      // hang. The deadline exists for a blocked/non-responsive open only.
-      clearTimeout(deadline)
-      const db = req.result
-      if (!db.objectStoreNames.contains(STORE)) {
-        db.createObjectStore(STORE, { keyPath: ['docId', 'seq', 'replica'] })
-      }
-      if (!db.objectStoreNames.contains(CONFIRMED)) {
-        db.createObjectStore(CONFIRMED, { keyPath: ['docId', 'replica'] })
-      }
-      if (!db.objectStoreNames.contains(REJECTED)) {
-        db.createObjectStore(REJECTED, { keyPath: ['docId', 'gid'] })
-      }
+    if (!db.objectStoreNames.contains(CONFIRMED)) {
+      db.createObjectStore(CONFIRMED, { keyPath: ['docId', 'replica'] })
     }
-    req.onsuccess = () => {
-      if (settled) {
-        // We already failed this attempt; don't leak the late connection.
-        req.result.close()
-        return
-      }
-      settled = true
-      clearTimeout(deadline)
-      const db = req.result
-      // Close when another tab needs to upgrade the schema, so a version bump
-      // never wedges the *other* tab. (Old code can't be fixed retroactively —
-      // this is why the open must also fail rather than wait.)
-      db.onversionchange = () => {
-        db.close()
-      }
-      resolve(db)
-    }
-    req.onerror = () => fail(req.error ?? new Error('doc-cache open failed'))
-    // Another tab holding an older schema blocks the upgrade: the request then
-    // neither succeeds nor fails. Give up so the app can load without a cache
-    // (the server streams the history) instead of showing an empty editor.
-    req.onblocked = () => fail(new Error('doc-cache upgrade blocked by another tab'))
-    // Backstop for a browser that never fires either event.
-    const deadline = setTimeout(() => fail(new Error('doc-cache open timed out')), 2000)
   })
   // Cache the in-flight open: every cache call goes through here (one per op, per
-  // ack, per keystroke), and an uncached open leaks a connection per call.
+  // ack, per keystroke), so an uncached open leaks a connection per call.
   dbPromise = p
-  // Let a later call retry: the blocking tab may have gone away, and the next
-  // open then upgrades normally.
   p.catch(() => {
     if (dbPromise === p) dbPromise = null
   })
   return p
+}
+
+function openRejectedDB() {
+  if (rejectedDbPromise) return rejectedDbPromise
+  const p = openExisting(REJECTED_DB, REJECTED, 1, (db) => {
+    if (!db.objectStoreNames.contains(REJECTED)) {
+      db.createObjectStore(REJECTED, { keyPath: ['docId', 'gid'] })
+    }
+  })
+  rejectedDbPromise = p
+  p.catch(() => {
+    if (rejectedDbPromise === p) rejectedDbPromise = null
+  })
+  return p
+}
+
+/** A database opened by an older build may predate the confirmed floor. */
+function hasConfirmed(/** @type {IDBDatabase} */ db) {
+  return db.objectStoreNames.contains(CONFIRMED)
 }
 
 /**
@@ -192,6 +230,7 @@ export async function cachedOps(docId) {
  */
 export async function confirmedFloors(docId) {
   const db = await openDB()
+  if (!hasConfirmed(db)) return {}
   return new Promise((resolve, reject) => {
     const tx = db.transaction(CONFIRMED, 'readonly')
     const range = IDBKeyRange.bound([docId], [docId, []])
@@ -222,6 +261,7 @@ export async function confirmedFloors(docId) {
  */
 export async function raiseConfirmed(docId, replica, seq) {
   const db = await openDB()
+  if (!hasConfirmed(db)) return 0
   return new Promise((resolve, reject) => {
     const tx = db.transaction(CONFIRMED, 'readwrite')
     const store = tx.objectStore(CONFIRMED)
@@ -252,6 +292,7 @@ export async function raiseConfirmed(docId, replica, seq) {
  */
 export async function setConfirmed(docId, replica, seq) {
   const db = await openDB()
+  if (!hasConfirmed(db)) return 0
   return new Promise((resolve, reject) => {
     const tx = db.transaction(CONFIRMED, 'readwrite')
     const store = tx.objectStore(CONFIRMED)
@@ -311,7 +352,7 @@ export async function cachedOpsCount(docId) {
 export async function rejectedGids(docId, at = {}) {
   const version = at.version ?? REJECT_VERSION
   const count = at.count === undefined ? null : at.count
-  const db = await openDB()
+  const db = await openRejectedDB()
   return new Promise((resolve, reject) => {
     const tx = db.transaction(REJECTED, 'readonly')
     const range = IDBKeyRange.bound([docId], [docId, []])
@@ -338,7 +379,7 @@ export async function rejectedGids(docId, at = {}) {
  *   was formed against
  */
 export async function addRejectedGid(docId, gid, at = {}) {
-  const db = await openDB()
+  const db = await openRejectedDB()
   await new Promise((resolve, reject) => {
     const tx = db.transaction(REJECTED, 'readwrite')
     tx.objectStore(REJECTED).put({
@@ -360,14 +401,27 @@ export async function addRejectedGid(docId, gid, at = {}) {
  * @param {string} docId
  */
 export async function clearDoc(docId) {
+  const range = () => IDBKeyRange.bound([docId], [docId, []])
+
   const db = await openDB()
+  const stores = [STORE, CONFIRMED].filter((s) => db.objectStoreNames.contains(s))
   await new Promise((resolve, reject) => {
-    const tx = db.transaction([STORE, CONFIRMED, REJECTED], 'readwrite')
-    const range = IDBKeyRange.bound([docId], [docId, []])
-    tx.objectStore(STORE).delete(range)
-    tx.objectStore(CONFIRMED).delete(range)
-    tx.objectStore(REJECTED).delete(range)
+    const tx = db.transaction(stores, 'readwrite')
+    for (const store of stores) tx.objectStore(store).delete(range())
     tx.oncomplete = () => resolve(undefined)
     tx.onerror = () => reject(tx.error)
   })
+
+  // The rejected set lives in its own database; a doc delete clears both.
+  try {
+    const rdb = await openRejectedDB()
+    await new Promise((resolve, reject) => {
+      const tx = rdb.transaction(REJECTED, 'readwrite')
+      tx.objectStore(REJECTED).delete(range())
+      tx.oncomplete = () => resolve(undefined)
+      tx.onerror = () => reject(tx.error)
+    })
+  } catch {
+    /* the verdict store is optional: nothing to clear if it can't be opened */
+  }
 }

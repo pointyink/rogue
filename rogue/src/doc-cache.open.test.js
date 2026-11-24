@@ -3,8 +3,8 @@
 // The doc-cache opens its IndexedDB once per page and reuses the connection.
 // That sounds obvious, but 0.4.2 shipped without assigning the cached promise:
 // every `cacheOp` (i.e. every op, every keystroke) opened a *new* connection and
-// none were ever closed. This file exists so a regression is one test away —
-// it needs its own module instance, hence its own file.
+// none were ever closed. This file exists so a regression is one test away — it
+// needs its own module instance, hence its own file.
 import 'fake-indexeddb/auto'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -18,15 +18,20 @@ function opPayload(replica, seq) {
 }
 
 describe('doc-cache connection', () => {
-  it('opens once and reuses the connection across calls', async () => {
+  it('reuses one connection for every cache call', async () => {
     const open = vi.spyOn(indexedDB, 'open')
     const { cacheOp, cachedOps, confirmedFloors } = await import('./doc-cache.js')
 
     await cacheOp('reuse', opPayload(1, 1))
+    const afterFirst = open.mock.calls.length
+    // A fresh database takes two opens (probe without a version, then create the
+    // schema). What matters is that it does not keep opening.
+    expect(afterFirst).toBeLessThanOrEqual(2)
+
     await cachedOps('reuse')
     await confirmedFloors('reuse')
     await cacheOp('reuse', opPayload(1, 2))
 
-    expect(open).toHaveBeenCalledTimes(1)
+    expect(open.mock.calls.length).toBe(afterFirst)
   })
 })
