@@ -49,8 +49,19 @@ let dbPromise = null
 
 function openDB() {
   if (dbPromise) return dbPromise
-  dbPromise = new Promise((resolve, reject) => {
+  /** @type {Promise<IDBDatabase>} */
+  const p = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION)
+    let settled = false
+    /** A blocked or broken open must FAIL, never hang: every caller awaits this
+     *  before syncing, so a request that never settles is a blank editor.
+     *  @param {Error} err */
+    const fail = (err) => {
+      if (settled) return
+      settled = true
+      clearTimeout(deadline)
+      reject(err)
+    }
     req.onupgradeneeded = () => {
       const db = req.result
       if (!db.objectStoreNames.contains(STORE)) {
@@ -63,16 +74,37 @@ function openDB() {
         db.createObjectStore(REJECTED, { keyPath: ['docId', 'gid'] })
       }
     }
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error)
-    // Another tab holding an older schema blocks the upgrade: the request then
-    // neither succeeds nor fails. Callers must be bounded (the rejected-op seed
-    // is), but say so, or a silent hang is indistinguishable from a slow disk.
-    req.onblocked = () => {
-      console.warn('[doc-cache] schema upgrade blocked by another tab — reload it')
+    req.onsuccess = () => {
+      if (settled) {
+        // We already failed this attempt; don't leak the late connection.
+        req.result.close()
+        return
+      }
+      settled = true
+      clearTimeout(deadline)
+      const db = req.result
+      // Close when another tab needs to upgrade the schema, so a version bump
+      // never wedges the *other* tab. (Old code can't be fixed retroactively —
+      // this is why the open must also fail rather than wait.)
+      db.onversionchange = () => {
+        db.close()
+      }
+      resolve(db)
     }
+    req.onerror = () => fail(req.error ?? new Error('doc-cache open failed'))
+    // Another tab holding an older schema blocks the upgrade: the request then
+    // neither succeeds nor fails. Give up so the app can load without a cache
+    // (the server streams the history) instead of showing an empty editor.
+    req.onblocked = () => fail(new Error('doc-cache upgrade blocked by another tab'))
+    // Backstop for a browser that never fires either event.
+    const deadline = setTimeout(() => fail(new Error('doc-cache open timed out')), 2000)
   })
-  return dbPromise
+  // Let a later call retry: the blocking tab may have gone away, and the next
+  // open then upgrades normally.
+  p.catch(() => {
+    if (dbPromise === p) dbPromise = null
+  })
+  return p
 }
 
 /**
