@@ -62,36 +62,31 @@ export function raiseConfirmed(docId: string, replica: number, seq: number): Pro
  */
 export function setConfirmed(docId: string, replica: number, seq: number): Promise<number>;
 /**
- * How many ops this doc has cached. Cheap enough to read on every load; used to
- * tell "nothing has changed since this verdict" from "the document grew".
- * @param {string} docId
- * @returns {Promise<number>}
- */
-export function cachedOpsCount(docId: string): Promise<number>;
-/**
  * Ops this engine has decided it cannot render, as `"replica:seq"` keys.
  *
  * A load that walks back, or an op rejected on apply, is a permanent verdict for
  * *this* engine version but not necessarily for the next one, so the version
  * travels with the verdict and a mismatch is ignored (the op is retried).
  *
- * A verdict is also keyed by the number of cached ops it was formed against. A
- * walk-back rejection is *context-dependent* — the engine's contract is that an
- * op invalid at its own prefix may be valid once later ops arrive (see
- * docs/plan-load-walkback.md) — so a document that has grown since the verdict
- * must be re-examined, not skipped. That matters: a paste whose opening and
- * closing tags arrive in different sessions would otherwise stay truncated.
+ * A verdict is **not** keyed by the cache size. It was, to catch a rejection that
+ * only held for a particular prefix (an op invalid alone but valid once later
+ * ops arrive — see docs/plan-load-walkback.md), but the size is read while the
+ * last cache writes are still in flight, so the recorded number is routinely a
+ * few short. The next load then sees a "changed" document, ignores the verdict,
+ * walks back, and records another slightly-wrong number: it never converges, and
+ * the document pays the walk-back on every load. Correctness is not at stake —
+ * a stale verdict can only hide an op that would now render — and re-examining
+ * is a separate, cheap job once the document is up, not a reason to skip the
+ * fast path for ever.
  *
  * Keyed by gid alone, so a doc deleted and re-created with the same id while
  * this client was offline would inherit a stale verdict. `clearDoc` drops them
  * on an observed deletion; the offline-recreate window is the only gap.
  * @param {string} docId
- * @param {{ count?: number, version?: string }} [at] the cache size the verdict
- *   applies to; omit to read regardless of size
+ * @param {{ version?: string }} [at]
  * @returns {Promise<string[]>}
  */
 export function rejectedGids(docId: string, at?: {
-    count?: number;
     version?: string;
 }): Promise<string[]>;
 /**
@@ -99,11 +94,9 @@ export function rejectedGids(docId: string, at?: {
  * the walk-back again. Idempotent.
  * @param {string} docId
  * @param {string} gid `"replica:seq"`
- * @param {{ count?: number, version?: string }} [at] the cache size the verdict
- *   was formed against
+ * @param {{ version?: string }} [at]
  */
 export function addRejectedGid(docId: string, gid: string, at?: {
-    count?: number;
     version?: string;
 }): Promise<void>;
 /**
