@@ -63,6 +63,9 @@ function openDB() {
       reject(err)
     }
     req.onupgradeneeded = () => {
+      // A real migration may take a while on a slow device; it is progress, not a
+      // hang. The deadline exists for a blocked/non-responsive open only.
+      clearTimeout(deadline)
       const db = req.result
       if (!db.objectStoreNames.contains(STORE)) {
         db.createObjectStore(STORE, { keyPath: ['docId', 'seq', 'replica'] })
@@ -99,6 +102,9 @@ function openDB() {
     // Backstop for a browser that never fires either event.
     const deadline = setTimeout(() => fail(new Error('doc-cache open timed out')), 2000)
   })
+  // Cache the in-flight open: every cache call goes through here (one per op, per
+  // ack, per keystroke), and an uncached open leaks a connection per call.
+  dbPromise = p
   // Let a later call retry: the blocking tab may have gone away, and the next
   // open then upgrades normally.
   p.catch(() => {
