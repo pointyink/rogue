@@ -62,7 +62,53 @@ export function raiseConfirmed(docId: string, replica: number, seq: number): Pro
  */
 export function setConfirmed(docId: string, replica: number, seq: number): Promise<number>;
 /**
- * Drop a doc's cached history and its confirmed floor (e.g. on doc delete).
+ * How many ops this doc has cached. Cheap enough to read on every load; used to
+ * tell "nothing has changed since this verdict" from "the document grew".
+ * @param {string} docId
+ * @returns {Promise<number>}
+ */
+export function cachedOpsCount(docId: string): Promise<number>;
+/**
+ * Ops this engine has decided it cannot render, as `"replica:seq"` keys.
+ *
+ * A load that walks back, or an op rejected on apply, is a permanent verdict for
+ * *this* engine version but not necessarily for the next one, so the version
+ * travels with the verdict and a mismatch is ignored (the op is retried).
+ *
+ * A verdict is also keyed by the number of cached ops it was formed against. A
+ * walk-back rejection is *context-dependent* — the engine's contract is that an
+ * op invalid at its own prefix may be valid once later ops arrive (see
+ * docs/plan-load-walkback.md) — so a document that has grown since the verdict
+ * must be re-examined, not skipped. That matters: a paste whose opening and
+ * closing tags arrive in different sessions would otherwise stay truncated.
+ *
+ * Keyed by gid alone, so a doc deleted and re-created with the same id while
+ * this client was offline would inherit a stale verdict. `clearDoc` drops them
+ * on an observed deletion; the offline-recreate window is the only gap.
+ * @param {string} docId
+ * @param {{ count?: number, version?: string }} [at] the cache size the verdict
+ *   applies to; omit to read regardless of size
+ * @returns {Promise<string[]>}
+ */
+export function rejectedGids(docId: string, at?: {
+    count?: number;
+    version?: string;
+}): Promise<string[]>;
+/**
+ * Remember that this engine cannot render an op, so the next load does not pay
+ * the walk-back again. Idempotent.
+ * @param {string} docId
+ * @param {string} gid `"replica:seq"`
+ * @param {{ count?: number, version?: string }} [at] the cache size the verdict
+ *   was formed against
+ */
+export function addRejectedGid(docId: string, gid: string, at?: {
+    count?: number;
+    version?: string;
+}): Promise<void>;
+/**
+ * Drop a doc's cached history, its confirmed floor and its rejected set (e.g. on
+ * doc delete).
  * They go together: a floor without the history would skip ops on the next
  * sync, and the history without the floor only costs a re-download.
  * @param {string} docId

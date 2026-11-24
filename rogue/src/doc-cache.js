@@ -32,9 +32,17 @@
 import * as nodeIdV0 from '@pointyink/serde/node_id_v0'
 
 const DB_NAME = 'rogue-doc-cache'
-const DB_VERSION = 2
+const DB_VERSION = 3
 const STORE = 'ops'
 const CONFIRMED = 'confirmed'
+const REJECTED = 'rejected'
+
+// Bump when the HTML validator or the recovery policy changes. A rejected op is
+// a claim about *this* engine ("I cannot render it"), not about the document, so
+// a new engine must be allowed to look again — a stricter-then-fixed validator
+// should not keep an op hidden for ever. Stored with each row and compared on
+// read; stale rows are simply ignored.
+const REJECT_VERSION = '0.4.1'
 
 /** @type {Promise<IDBDatabase> | null} */
 let dbPromise = null
@@ -51,9 +59,18 @@ function openDB() {
       if (!db.objectStoreNames.contains(CONFIRMED)) {
         db.createObjectStore(CONFIRMED, { keyPath: ['docId', 'replica'] })
       }
+      if (!db.objectStoreNames.contains(REJECTED)) {
+        db.createObjectStore(REJECTED, { keyPath: ['docId', 'gid'] })
+      }
     }
     req.onsuccess = () => resolve(req.result)
     req.onerror = () => reject(req.error)
+    // Another tab holding an older schema blocks the upgrade: the request then
+    // neither succeeds nor fails. Callers must be bounded (the rejected-op seed
+    // is), but say so, or a silent hang is indistinguishable from a slow disk.
+    req.onblocked = () => {
+      console.warn('[doc-cache] schema upgrade blocked by another tab — reload it')
+    }
   })
   return dbPromise
 }
@@ -215,7 +232,91 @@ export async function setConfirmed(docId, replica, seq) {
 }
 
 /**
- * Drop a doc's cached history and its confirmed floor (e.g. on doc delete).
+ * How many ops this doc has cached. Cheap enough to read on every load; used to
+ * tell "nothing has changed since this verdict" from "the document grew".
+ * @param {string} docId
+ * @returns {Promise<number>}
+ */
+export async function cachedOpsCount(docId) {
+  const db = await openDB()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readonly')
+    const range = IDBKeyRange.bound([docId], [docId, []])
+    const req = tx.objectStore(STORE).count(range)
+    req.onsuccess = () => resolve(Number(req.result) || 0)
+    req.onerror = () => reject(req.error)
+  })
+}
+
+/**
+ * Ops this engine has decided it cannot render, as `"replica:seq"` keys.
+ *
+ * A load that walks back, or an op rejected on apply, is a permanent verdict for
+ * *this* engine version but not necessarily for the next one, so the version
+ * travels with the verdict and a mismatch is ignored (the op is retried).
+ *
+ * A verdict is also keyed by the number of cached ops it was formed against. A
+ * walk-back rejection is *context-dependent* — the engine's contract is that an
+ * op invalid at its own prefix may be valid once later ops arrive (see
+ * docs/plan-load-walkback.md) — so a document that has grown since the verdict
+ * must be re-examined, not skipped. That matters: a paste whose opening and
+ * closing tags arrive in different sessions would otherwise stay truncated.
+ *
+ * Keyed by gid alone, so a doc deleted and re-created with the same id while
+ * this client was offline would inherit a stale verdict. `clearDoc` drops them
+ * on an observed deletion; the offline-recreate window is the only gap.
+ * @param {string} docId
+ * @param {{ count?: number, version?: string }} [at] the cache size the verdict
+ *   applies to; omit to read regardless of size
+ * @returns {Promise<string[]>}
+ */
+export async function rejectedGids(docId, at = {}) {
+  const version = at.version ?? REJECT_VERSION
+  const count = at.count === undefined ? null : at.count
+  const db = await openDB()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(REJECTED, 'readonly')
+    const range = IDBKeyRange.bound([docId], [docId, []])
+    const req = tx.objectStore(REJECTED).getAll(range)
+    req.onsuccess = () => {
+      const out = []
+      for (const row of /** @type {any[]} */ (req.result) || []) {
+        if (row.version !== version) continue
+        if (count !== null && Number(row.count) !== count) continue
+        out.push(String(row.gid))
+      }
+      resolve(out)
+    }
+    req.onerror = () => reject(req.error)
+  })
+}
+
+/**
+ * Remember that this engine cannot render an op, so the next load does not pay
+ * the walk-back again. Idempotent.
+ * @param {string} docId
+ * @param {string} gid `"replica:seq"`
+ * @param {{ count?: number, version?: string }} [at] the cache size the verdict
+ *   was formed against
+ */
+export async function addRejectedGid(docId, gid, at = {}) {
+  const db = await openDB()
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(REJECTED, 'readwrite')
+    tx.objectStore(REJECTED).put({
+      docId,
+      gid,
+      version: at.version ?? REJECT_VERSION,
+      count: at.count,
+    })
+    tx.oncomplete = () => resolve(undefined)
+    tx.onerror = () => reject(tx.error)
+  })
+}
+
+/**
+ * Drop a doc's cached history, its confirmed floor and its rejected set (e.g. on
+ * doc delete).
  * They go together: a floor without the history would skip ops on the next
  * sync, and the history without the floor only costs a re-download.
  * @param {string} docId
@@ -223,10 +324,11 @@ export async function setConfirmed(docId, replica, seq) {
 export async function clearDoc(docId) {
   const db = await openDB()
   await new Promise((resolve, reject) => {
-    const tx = db.transaction([STORE, CONFIRMED], 'readwrite')
+    const tx = db.transaction([STORE, CONFIRMED, REJECTED], 'readwrite')
     const range = IDBKeyRange.bound([docId], [docId, []])
     tx.objectStore(STORE).delete(range)
     tx.objectStore(CONFIRMED).delete(range)
+    tx.objectStore(REJECTED).delete(range)
     tx.oncomplete = () => resolve(undefined)
     tx.onerror = () => reject(tx.error)
   })

@@ -108,6 +108,15 @@ export function nodeSpan(rope, node) {
  * @property {() => void} [onDocTooLarge] Called when an edit can't be applied
  *   because the document has reached its storage capacity. The edit is reverted
  *   (the CRDT is left untouched).
+ * @property {Iterable<string>} [rejectedOps] Ops this client already decided it
+ *   cannot render, as `"replica:seq"` keys from a previous session. They are not
+ *   merged, so a load does not walk back over them again. The host owns the
+ *   storage (see `onRejectOps`), including invalidating it when the engine's
+ *   validator changes.
+ * @property {(gids: string[]) => void} [onRejectOps] Called with the key of every
+ *   op the engine decides it cannot render — a load walk-back, or an op rejected
+ *   on apply. Pair it with `rejectedOps` to make the verdict durable; without it
+ *   every load pays the walk-back again.
  * @property {(info: { html: string, normalized: string }) => void} [onBadEdit]
  *   Called when a local edit would mint an op whose HTML the browser cannot
  *   represent — it does not round-trip through `innerHTML`. Such an op renders
@@ -233,6 +242,8 @@ export async function createRogueNode({
   onOpTooLarge,
   onDocTooLarge,
   onBadEdit,
+  rejectedOps,
+  onRejectOps,
   sizeWarn,
   onSizeWarning,
   onError,
@@ -1883,8 +1894,18 @@ export async function createRogueNode({
     return a.seq - b.seq || a.replica - b.replica;
   }
 
-  /** Group ids of ops that were rejected (produced invalid HTML). */
+  /** Group ids of ops that were rejected (produced invalid HTML). Seeded with
+   *  the host's durable verdict so a load does not re-discover it. */
   const rejected = new Set();
+  for (const key of rejectedOps ?? []) rejected.add(String(key));
+
+  /** Add a rejection and tell the host, so it can make the verdict durable.
+   *  @param {string} key */
+  function rejectOp(key) {
+    if (rejected.has(key)) return;
+    rejected.add(key);
+    onRejectOps?.([key]);
+  }
 
   /** Applied groups, sorted by (seq, replica) — the fold order. */
   let appliedGroups = /** @type {{ gid: Gid, payload: Uint8Array }[]} */ ([]);
@@ -2064,7 +2085,7 @@ export async function createRogueNode({
 
       if (rejectedOp) {
         crdt.revertTail(1);
-        rejected.add(key);
+        rejectOp(key);
         appliedKeys.delete(key);
         untrackLast();
         maxGid = prevMax;
@@ -2182,7 +2203,7 @@ export async function createRogueNode({
       console.error("[sync] load recovery found no valid prefix", { popped: popped.length });
       onError?.({ type: -1, name: "load_recovery_failed" });
     } else {
-      rejected.add(gidKey(dirty.gid));
+      rejectOp(gidKey(dirty.gid));
     }
 
     // Application order is not gid order, so the head is the max over the prefix.
