@@ -17,6 +17,7 @@ import { createSuggestions } from './suggestions.js'
 import { resolveReplicaId, syncBaseUrlFromWsUrl } from './replica.js'
 import { createSyncClient } from './sync-client.js'
 import { createDocBus } from './doc-bus.js'
+import { rejectedGids, addRejectedGid } from './doc-cache.js'
 
 /**
  * The editor surface a host adapts for the shared session. Host-specific.
@@ -130,6 +131,13 @@ export async function createEditorSession({
     replicaId = await resolveReplicaId({ docId, wsUrl, getToken, isNewDoc, readOnly })
   }
 
+  // A previous session may already have decided this engine cannot render one of
+  // the doc's ops. Seeding the verdict skips the walk-back that re-discovers it
+  // (which is seconds on a real document); anything newly rejected is remembered
+  // here so the next load is cheap too. `doc-cache` keys the verdict by engine
+  // version, so a validator fix gets to look again.
+  const seededRejects = docId ? await rejectedGids(docId).catch(() => []) : []
+
   const node = await createRogueNode({
     element,
     doc,
@@ -144,6 +152,15 @@ export async function createEditorSession({
     paste,
     onOpTooLarge,
     onDocTooLarge,
+    rejectedOps: seededRejects,
+    onRejectOps: (gids) => {
+      if (!docId) return
+      for (const gid of gids) {
+        addRejectedGid(docId, gid).catch((err) =>
+          console.error('[editor-session] rejected op not remembered:', err),
+        )
+      }
+    },
     sizeWarn,
     onSizeWarning,
     onError,

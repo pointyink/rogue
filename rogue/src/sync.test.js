@@ -878,6 +878,50 @@ describe('createRogueNode', () => {
       expect(el.innerHTML).toBe(afterLoad)
     })
 
+    it('reports the op a walk-back drops, so the host can remember it', async () => {
+      const payloads = makeLog(['<p>1</p>', '</p>', '<p>3</p>'])
+      const el = makeEditor()
+      /** @type {string[][]} */
+      const reports = []
+      const node = await createRogueNode({
+        element: el,
+        replicaId: 1,
+        onRejectOps: (gids) => reports.push(gids),
+      })
+      node.beginLoad()
+      for (const p of payloads) node.mergeOp(p)
+      node.endLoad()
+
+      const v = new DataView(payloads[1].buffer, payloads[1].byteOffset, payloads[1].byteLength)
+      const dropped = `${v.getUint16(0, true)}:${v.getUint32(2, true)}`
+      expect(reports.flat()).toContain(dropped)
+      expect(validHtml(el.innerHTML)).toBe(true)
+    })
+
+    it('does not re-discover an op the host already reported', async () => {
+      const payloads = makeLog(['<p>1</p>', '</p>', '<p>3</p>'])
+      const v = new DataView(payloads[1].buffer, payloads[1].byteOffset, payloads[1].byteLength)
+      const known = `${v.getUint16(0, true)}:${v.getUint32(2, true)}`
+      const el = makeEditor()
+      /** @type {string[][]} */
+      const reports = []
+      const node = await createRogueNode({
+        element: el,
+        replicaId: 1,
+        rejectedOps: [known],
+        onRejectOps: (gids) => reports.push(gids),
+      })
+      node.beginLoad()
+      for (const p of payloads) node.mergeOp(p)
+      node.endLoad()
+
+      // Skipped at merge, so the render is valid on the first try: no walk-back,
+      // nothing new to report. This is the whole point of persisting the verdict.
+      expect(reports).toHaveLength(0)
+      expect(validHtml(el.innerHTML)).toBe(true)
+      expect(el.innerHTML).toContain('<p>1</p>')
+    })
+
     it('drains a parked op below the head after a clean load', async () => {
       /** @param {number} replica @param {number} seq @param {number|null} parentRep @param {number} parentSeq @param {string} html */
       const insert = (replica, seq, parentRep, parentSeq, html) => {

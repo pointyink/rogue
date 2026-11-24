@@ -55,6 +55,15 @@ export function nodeSpan(rope: NonNullable<ReturnType<typeof buildRope>>, node: 
  * @property {() => void} [onDocTooLarge] Called when an edit can't be applied
  *   because the document has reached its storage capacity. The edit is reverted
  *   (the CRDT is left untouched).
+ * @property {Iterable<string>} [rejectedOps] Ops this client already decided it
+ *   cannot render, as `"replica:seq"` keys from a previous session. They are not
+ *   merged, so a load does not walk back over them again. The host owns the
+ *   storage (see `onRejectOps`), including invalidating it when the engine's
+ *   validator changes.
+ * @property {(gids: string[]) => void} [onRejectOps] Called with the key of every
+ *   op the engine decides it cannot render — a load walk-back, or an op rejected
+ *   on apply. Pair it with `rejectedOps` to make the verdict durable; without it
+ *   every load pays the walk-back again.
  * @property {(info: { html: string, normalized: string }) => void} [onBadEdit]
  *   Called when a local edit would mint an op whose HTML the browser cannot
  *   represent — it does not round-trip through `innerHTML`. Such an op renders
@@ -168,7 +177,7 @@ export function nodeSpan(rope: NonNullable<ReturnType<typeof buildRope>>, node: 
  * @param {RogueNodeOptions} options
  * @returns {Promise<RogueNode>}
  */
-export function createRogueNode({ element: editorRoot, replicaId, onCommit, maxOpBytes, onOpTooLarge, onDocTooLarge, onBadEdit, sizeWarn, onSizeWarning, onError, onChange, paste, doc, win, serializeNode, omitNode, unwrapNode, opaqueNode, validateHtml, }: RogueNodeOptions): Promise<RogueNode>;
+export function createRogueNode({ element: editorRoot, replicaId, onCommit, maxOpBytes, onOpTooLarge, onDocTooLarge, onBadEdit, rejectedOps, onRejectOps, sizeWarn, onSizeWarning, onError, onChange, paste, doc, win, serializeNode, omitNode, unwrapNode, opaqueNode, validateHtml, }: RogueNodeOptions): Promise<RogueNode>;
 export type RogueNodeOptions = {
     /**
      * The container the engine renders into and
@@ -207,6 +216,21 @@ export type RogueNodeOptions = {
      * (the CRDT is left untouched).
      */
     onDocTooLarge?: (() => void) | undefined;
+    /**
+     * Ops this client already decided it
+     * cannot render, as `"replica:seq"` keys from a previous session. They are not
+     * merged, so a load does not walk back over them again. The host owns the
+     * storage (see `onRejectOps`), including invalidating it when the engine's
+     * validator changes.
+     */
+    rejectedOps?: Iterable<string> | undefined;
+    /**
+     * Called with the key of every
+     * op the engine decides it cannot render — a load walk-back, or an op rejected
+     * on apply. Pair it with `rejectedOps` to make the verdict durable; without it
+     * every load pays the walk-back again.
+     */
+    onRejectOps?: ((gids: string[]) => void) | undefined;
     /**
      * Called when a local edit would mint an op whose HTML the browser cannot
      * represent — it does not round-trip through `innerHTML`. Such an op renders

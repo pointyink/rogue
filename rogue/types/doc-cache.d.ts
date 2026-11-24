@@ -62,7 +62,27 @@ export function raiseConfirmed(docId: string, replica: number, seq: number): Pro
  */
 export function setConfirmed(docId: string, replica: number, seq: number): Promise<number>;
 /**
- * Drop a doc's cached history and its confirmed floor (e.g. on doc delete).
+ * Ops this engine has decided it cannot render, as `"replica:seq"` keys.
+ *
+ * A load that walks back, or an op rejected on apply, is a permanent verdict for
+ * *this* engine version but not necessarily for the next one, so the version
+ * travels with the verdict and a mismatch is ignored (the op is retried).
+ * @param {string} docId
+ * @param {string} [version]
+ * @returns {Promise<string[]>}
+ */
+export function rejectedGids(docId: string, version?: string): Promise<string[]>;
+/**
+ * Remember that this engine cannot render an op, so the next load does not pay
+ * the walk-back again. Idempotent.
+ * @param {string} docId
+ * @param {string} gid `"replica:seq"`
+ * @param {string} [version]
+ */
+export function addRejectedGid(docId: string, gid: string, version?: string): Promise<void>;
+/**
+ * Drop a doc's cached history, its confirmed floor and its rejected set (e.g. on
+ * doc delete).
  * They go together: a floor without the history would skip ops on the next
  * sync, and the history without the floor only costs a re-download.
  * @param {string} docId
