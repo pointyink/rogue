@@ -17,7 +17,31 @@ import { createSuggestions } from './suggestions.js'
 import { resolveReplicaId, syncBaseUrlFromWsUrl } from './replica.js'
 import { createSyncClient } from './sync-client.js'
 import { createDocBus } from './doc-bus.js'
-import { rejectedGids, addRejectedGid } from './doc-cache.js'
+import { rejectedGids, addRejectedGid, cachedOpsCount } from './doc-cache.js'
+
+/**
+ * Resolve `p`, or `fallback` after `ms`. For a read that is an optimisation: a
+ * blocked IndexedDB open neither resolves nor rejects (another tab holds an
+ * older schema version), and a hung editor is far worse than a slower one.
+ * @template T
+ * @param {Promise<T>} p @param {number} ms @param {T} fallback
+ * @returns {Promise<T>}
+ */
+function withTimeout(p, ms, fallback) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(fallback), ms)
+    p.then(
+      (v) => {
+        clearTimeout(t)
+        resolve(v)
+      },
+      () => {
+        clearTimeout(t)
+        resolve(fallback)
+      },
+    )
+  })
+}
 
 /**
  * The editor surface a host adapts for the shared session. Host-specific.
@@ -136,7 +160,22 @@ export async function createEditorSession({
   // (which is seconds on a real document); anything newly rejected is remembered
   // here so the next load is cheap too. `doc-cache` keys the verdict by engine
   // version, so a validator fix gets to look again.
-  const seededRejects = docId ? await rejectedGids(docId).catch(() => []) : []
+  //
+  // Bounded on purpose: this read is an optimisation, and `indexedDB.open` can
+  // *hang* (not reject) when another tab holds an older schema version, which
+  // would otherwise keep the editor from ever being built. Falling back to no
+  // seed costs one walk-back, never a blank page.
+  const seededRejects = docId ? await withTimeout(seededVerdicts(docId), 500, []) : []
+
+  /** @param {string} id @returns {Promise<string[]>} */
+  async function seededVerdicts(id) {
+    try {
+      const count = await cachedOpsCount(id)
+      return await rejectedGids(id, { count })
+    } catch {
+      return []
+    }
+  }
 
   const node = await createRogueNode({
     element,
@@ -155,11 +194,17 @@ export async function createEditorSession({
     rejectedOps: seededRejects,
     onRejectOps: (gids) => {
       if (!docId) return
-      for (const gid of gids) {
-        addRejectedGid(docId, gid).catch((err) =>
-          console.error('[editor-session] rejected op not remembered:', err),
-        )
-      }
+      // The verdict is only valid for the cache as it is now; a later op makes
+      // it stale and the load re-examines the op instead of skipping it.
+      cachedOpsCount(docId)
+        .then((count) => {
+          for (const gid of gids) {
+            addRejectedGid(docId, gid, { count }).catch((err) =>
+              console.error('[editor-session] rejected op not remembered:', err),
+            )
+          }
+        })
+        .catch((err) => console.error('[editor-session] rejected op not remembered:', err))
     },
     sizeWarn,
     onSizeWarning,
