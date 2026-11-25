@@ -17,7 +17,7 @@ import { createSuggestions } from './suggestions.js'
 import { resolveReplicaId, syncBaseUrlFromWsUrl } from './replica.js'
 import { createSyncClient } from './sync-client.js'
 import { createDocBus } from './doc-bus.js'
-import { rejectedGids, addRejectedGid } from './doc-cache.js'
+import { rejectedGids, addRejectedGid, cachedPayloads } from './doc-cache.js'
 
 /**
  * Resolve `p`, or `fallback` after `ms`. For a read that is an optimisation: a
@@ -170,9 +170,21 @@ export async function createEditorSession({
   const seededRejects = docId ? await withTimeout(seededVerdicts(docId), 500, []) : []
 
   /** @param {string} id @returns {Promise<string[]>} */
+  /** Ops a previous session rejected, with the payloads needed to undo the skip
+   *  if this document does not validate without them.
+   *  @param {string} id
+   *  @returns {Promise<Array<{ gid: string, payload: Uint8Array }>>} */
   async function seededVerdicts(id) {
     try {
-      return await rejectedGids(id)
+      const gids = await rejectedGids(id)
+      if (gids.length === 0) return []
+      const payloads = await cachedPayloads(id, gids)
+      const out = []
+      for (const gid of gids) {
+        const payload = payloads.get(gid)
+        if (payload) out.push({ gid, payload })
+      }
+      return out
     } catch {
       return []
     }
@@ -193,7 +205,7 @@ export async function createEditorSession({
     onOpTooLarge,
     onDocTooLarge,
     onBadEdit,
-    rejectedOps: seededRejects,
+    skipOps: seededRejects,
     onRejectOps: (gids) => {
       if (!docId) return
       for (const gid of gids) {
