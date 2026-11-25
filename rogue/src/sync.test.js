@@ -924,11 +924,13 @@ describe('createRogueNode', () => {
       expect(el.innerHTML).toContain('<p>1</p>')
     })
 
-    it('undoes a skip set by merging through the ordering path', async () => {
+    it('keeps the ledger gid-ordered when it undoes a skip set', async () => {
       // The fallback must not merge a skipped op at the head by hand. A skipped
       // op is normally a MIDDLE op: if it is appended to the CRDT's
       // application-order stack, group_order is no longer sorted, and the next
       // out-of-order op reverts the wrong groups — the empty-document bug.
+      // This asserts the ledger, which is what the next out-of-order op reads;
+      // the document itself renders correctly either way at this point.
       const A = rootInsert(2, 1, bytes('<p>a')) // 4 chars
       const B = rootInsert(2, 5, bytes('</p>')) // 4 chars: closes A
       const C = rootInsert(2, 9, bytes('<p>c</p>'))

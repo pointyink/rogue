@@ -2352,6 +2352,10 @@ export async function createRogueNode({
       // appliedGroups and revertTail the wrong groups: the empty-document class of
       // bug. `loading` stays true so these merges are unvalidated and unrendered
       // like the rest of the bootstrap; validation below decides.
+      // Best-effort, like the rest of applyOp: an op that still will not merge is
+      // parked, and one that is permanently malformed (or that hits the parked
+      // cap) is dropped loudly — its cache row survives, so the next load sees it
+      // again. Nothing is silently forgotten.
       if (skipped.size > 0 && !validateHtml(crdt.render() ?? "", editorRoot)) {
         const retry = [...skipped.entries()];
         skipped.clear();
