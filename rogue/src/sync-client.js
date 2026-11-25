@@ -24,7 +24,7 @@ import {
   markAcked,
   clearDoc as clearCacheDoc,
 } from './doc-cache.js'
-import { advanceWatermark, mergeAndAdvance, appendSince } from './checkpoint.js'
+import { appendSince } from './checkpoint.js'
 import * as multiOpV0 from '@pointyink/serde/multi_op_v0'
 import * as ackV0 from '@pointyink/serde/ack_v0'
 import * as nodeIdV0 from '@pointyink/serde/node_id_v0'
@@ -158,14 +158,6 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
   // idempotency rescues correctness but wastes bytes on every reconnect).
   let opChain = Promise.resolve()
 
-  // Per-replica sync watermark: {"<replica>": <max seq>}. A single (seq, replica)
-  // high-water mark would drop a lagging replica's ops, so we track the max seq
-  // per replica — advanced by every op we merge (remote or our own). In-memory,
-  // but rebuilt on load by replaying the doc cache (see bootstrap), so the
-  // client can now safely resume across reloads.
-  /** @type {Record<string, number>} */
-  const watermark = {}
-
   // Per-replica `since`: the highest seq this client has *cached* for that
   // replica. `(replica, seq)` is a Lamport clock, so seqs have gaps by design —
   // a contiguous floor can never advance past the first one, and `since` would
@@ -190,7 +182,7 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
 
   /** @type {Set<string>} */
   /** localStorage key for the repair state: which replicas need a full replay,
-   *  and how many replays each has already had. The watermark itself is
+   *  and how many replays each has already had. `since` itself is
    *  deliberately not persisted (see checkpoint.js), but a *gap* is different: it
    *  says "my history here is incomplete", which stays true across reloads until
    *  a replay fills it. Without this a hole is only noticed in the session that
@@ -252,18 +244,17 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
   let replaying = new Set()
 
   /**
-   * Stop re-requesting a hole that two full replays could not fill. The floor
-   * jumps to the highest op we have for that replica, which is the same
-   * acceptance the max-watermark made implicitly — but now it is an explicit,
-   * logged decision rather than the default.
+   * Stop re-requesting a hole that two full replays could not fill.
+   *
+   * The repair loop is driven by `incomplete` (it is what omits a replica from
+   * `since`), so dropping it here is the whole mechanism. Deliberately does NOT
+   * advance `since`: `since` is derived from the rows, and moving it past an op
+   * this client does not have would tell the server to skip content it still
+   * holds. A genuine leaf gap is found by the per-replica count instead.
    * @param {string} replica
    */
   function giveUpOn(replica) {
-    // Stop asking for a hole two replays could not fill. In-memory only: it is
-    // re-derived from the rows on the next load, which is where a genuinely
-    // missing op should be noticed again (by the count, not by a floor).
-    const max = watermark[replica] ?? 0
-    noteCached(Number(replica), max)
+    if (incomplete.delete(replica)) saveRepairState()
   }
 
   /**
@@ -319,7 +310,7 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
     /** @type {ApplyOutcome} */
     let outcome
     try {
-      outcome = mergeAndAdvance(mergeOp, watermark, payload)
+      outcome = mergeOp(payload) ?? 'applied' 
       // Only a *parked* op is a hole: 'deferred' merely means an IME owns the DOM
       // and it will be applied on composition end — flagging it as a gap would
       // burn the repair budget and log a false "unresolved".
@@ -404,7 +395,7 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
         try {
           mergeOpTracked(payload)
         } catch (err) {
-          // A bad/out-of-order op: skip it — the watermark wasn't advanced, so
+          // A bad/out-of-order op: skip it — the cache row was not written, so
           // it's re-fetched on the next sync.
           console.error('[sync-client] merge failed:', err)
         }
@@ -589,8 +580,6 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
           }
         }
         if (id) await enqueue(docId, id, payload)
-        // The max applied, kept only for the give-up path in `noteGap`.
-        advanceWatermark(watermark, payload)
         sendOpFrame(payload)
       })
       .catch((err) => console.error('[sync-client] enqueue/send failed:', err))
@@ -619,8 +608,8 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
   /**
    * Replay the cached op log into the (fresh) CRDT once on init, before the
    * first connect. This warms the doc from cache — the editor renders
-   * immediately, offline or while the WS is still dialing — and rebuilds the
-   * watermark from the ops actually present, so the first `since` reflects a
+   * immediately, offline or while the WS is still dialing — and rebuilds
+   * `since` from the rows actually present, so the first connect asks for a
    * history the client genuinely holds. Then connect for the delta.
    */
   async function bootstrap() {
@@ -653,8 +642,8 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
       for (const payload of cached) {
         if (destroyed) return
         try {
-          // Replay merges + advances the watermark, but the op is already in
-          // the cache — mergeAndAccount(cache=false) skips re-caching.
+          // The op is already in the cache, so replay skips re-caching
+          // (mergeAndAccount(cache=false)).
           mergeAndAccount(payload, false)
         } catch (err) {
           console.error('[sync-client] cache replay failed:', err)
