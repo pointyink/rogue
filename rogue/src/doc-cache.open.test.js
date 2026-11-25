@@ -20,7 +20,7 @@ function opPayload(replica, seq) {
 describe('doc-cache connection', () => {
   it('reuses one connection for every cache call', async () => {
     const open = vi.spyOn(indexedDB, 'open')
-    const { cacheOp, cachedOps, confirmedFloors } = await import('./doc-cache.js')
+    const { cacheOp, cachedOps, maxSeqPerReplica } = await import('./doc-cache.js')
 
     await cacheOp('reuse', opPayload(1, 1))
     const afterFirst = open.mock.calls.length
@@ -29,7 +29,7 @@ describe('doc-cache connection', () => {
     expect(afterFirst).toBeLessThanOrEqual(2)
 
     await cachedOps('reuse')
-    await confirmedFloors('reuse')
+    await maxSeqPerReplica('reuse')
     await cacheOp('reuse', opPayload(1, 2))
 
     expect(open.mock.calls.length).toBe(afterFirst)

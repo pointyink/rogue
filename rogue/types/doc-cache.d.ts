@@ -14,14 +14,23 @@ export function cacheOp(docId: string, payload: Uint8Array, opts?: {
     own?: boolean;
 }): Promise<void>;
 /**
+ * The highest cached seq per replica — the `since` a client should ask from.
+ * `seq` is a Lamport clock with gaps, so this is a maximum, not a coverage
+ * count. Re-derived on every load, so it can never claim an op that is not here.
+ * @param {string} docId
+ * @returns {Promise<Record<string, number>>}
+ */
+export function maxSeqPerReplica(docId: string): Promise<Record<string, number>>;
+/**
  * Every cached op for a doc, with its provenance, in canonical (seq, replica)
  * order — the order to replay into a fresh CRDT.
  * @param {string} docId
- * @returns {Promise<Array<{ payload: Uint8Array, own: boolean }>>}
+ * @returns {Promise<Array<{ payload: Uint8Array, own: boolean, acked: boolean }>>}
  */
 export function cachedRows(docId: string): Promise<Array<{
     payload: Uint8Array;
     own: boolean;
+    acked: boolean;
 }>>;
 /**
  * Return every cached op for a doc, in canonical (seq, replica) order — the
@@ -32,35 +41,25 @@ export function cachedRows(docId: string): Promise<Array<{
  */
 export function cachedOps(docId: string): Promise<Uint8Array[]>;
 /**
+ * Mark rows as confirmed by the server (an ack, or the server sending them back).
+ * Idempotent; rows that are already acked are rewritten harmlessly.
  * @param {string} docId
- * @returns {Promise<Record<string, number>>} replica id → confirmed floor
+ * @param {Array<{ replica: number, seq: number }>} ids
+ * @returns {Promise<void>}
  */
-export function confirmedFloors(docId: string): Promise<Record<string, number>>;
+export function markAcked(docId: string, ids: Array<{
+    replica: number;
+    seq: number;
+}>): Promise<void>;
 /**
- * Advance a replica's confirmed floor by one, if this seq is the next one.
- *
- * The read and the write are one transaction, so concurrent callers cannot
- * both see the same floor and leapfrog. A seq that is not exactly `floor + 1`
- * is ignored: either it is already covered, or there is a hole below it — and
- * the whole point is that a hole must not be stepped over.
+ * The stored payloads for a set of `"replica:seq"` keys. The skip set needs them:
+ * a skipped op has to be mergeable *after* the fact when the document turns out
+ * not to validate without it.
  * @param {string} docId
- * @param {number} replica
- * @param {number} seq
- * @returns {Promise<number>} the floor after the attempt
+ * @param {string[]} gids
+ * @returns {Promise<Map<string, Uint8Array>>}
  */
-export function raiseConfirmed(docId: string, replica: number, seq: number): Promise<number>;
-/**
- * Force a replica's confirmed floor, past a hole that two full replays could
- * not fill. This is the one place the floor may skip a seq: the op is
- * genuinely gone from the server, and continuing to ask for it would re-download
- * the replica's whole tail on every connect, for ever. Monotonic — never moves
- * backwards.
- * @param {string} docId
- * @param {number} replica
- * @param {number} seq
- * @returns {Promise<number>} the floor after the write
- */
-export function setConfirmed(docId: string, replica: number, seq: number): Promise<number>;
+export function cachedPayloads(docId: string, gids: string[]): Promise<Map<string, Uint8Array>>;
 /**
  * Ops this engine has decided it cannot render, as `"replica:seq"` keys.
  *

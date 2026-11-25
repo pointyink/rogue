@@ -146,11 +146,6 @@ function openRejectedDB() {
   return p
 }
 
-/** A database opened by an older build may predate the confirmed floor. */
-function hasConfirmed(/** @type {IDBDatabase} */ db) {
-  return db.objectStoreNames.contains(CONFIRMED)
-}
-
 /**
  * @param {Uint8Array} payload
  * @returns {{ replica: number, seq: number } | null}
@@ -186,6 +181,9 @@ export async function cacheOp(docId, payload, opts = {}) {
       replica: id.replica,
       payload,
       own: opts.own === true,
+      // A remote op came from the server, so the server has it. An own op is
+      // unconfirmed until its ack (or until the server sends it back to us).
+      acked: opts.own !== true,
     })
     tx.oncomplete = () => resolve(undefined)
     tx.onerror = () => reject(tx.error)
@@ -193,10 +191,37 @@ export async function cacheOp(docId, payload, opts = {}) {
 }
 
 /**
+ * The highest cached seq per replica — the `since` a client should ask from.
+ * `seq` is a Lamport clock with gaps, so this is a maximum, not a coverage
+ * count. Re-derived on every load, so it can never claim an op that is not here.
+ * @param {string} docId
+ * @returns {Promise<Record<string, number>>}
+ */
+export async function maxSeqPerReplica(docId) {
+  const db = await openDB()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readonly')
+    const range = IDBKeyRange.bound([docId], [docId, []])
+    const req = tx.objectStore(STORE).getAllKeys(range)
+    req.onsuccess = () => {
+      /** @type {Record<string, number>} */
+      const out = {}
+      for (const key of /** @type {any[]} */ (req.result) || []) {
+        const seq = Number(key[1])
+        const replica = String(key[2])
+        if (!(replica in out) || seq > out[replica]) out[replica] = seq
+      }
+      resolve(out)
+    }
+    req.onerror = () => reject(req.error)
+  })
+}
+
+/**
  * Every cached op for a doc, with its provenance, in canonical (seq, replica)
  * order — the order to replay into a fresh CRDT.
  * @param {string} docId
- * @returns {Promise<Array<{ payload: Uint8Array, own: boolean }>>}
+ * @returns {Promise<Array<{ payload: Uint8Array, own: boolean, acked: boolean }>>}
  */
 export async function cachedRows(docId) {
   const db = await openDB()
@@ -206,7 +231,13 @@ export async function cachedRows(docId) {
     const req = tx.objectStore(STORE).getAll(range)
     req.onsuccess = () => {
       const items = /** @type {any[]} */ (req.result) || []
-      resolve(items.map((it) => ({ payload: it.payload, own: it.own === true })))
+      resolve(
+        items.map((it) => ({
+          payload: it.payload,
+          own: it.own === true,
+          acked: it.acked !== false,
+        })),
+      )
     }
     req.onerror = () => reject(req.error)
   })
@@ -225,87 +256,55 @@ export async function cachedOps(docId) {
 }
 
 /**
+ * Mark rows as confirmed by the server (an ack, or the server sending them back).
+ * Idempotent; rows that are already acked are rewritten harmlessly.
  * @param {string} docId
- * @returns {Promise<Record<string, number>>} replica id → confirmed floor
+ * @param {Array<{ replica: number, seq: number }>} ids
+ * @returns {Promise<void>}
  */
-export async function confirmedFloors(docId) {
+export async function markAcked(docId, ids) {
+  if (ids.length === 0) return
   const db = await openDB()
-  if (!hasConfirmed(db)) return {}
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(CONFIRMED, 'readonly')
-    const range = IDBKeyRange.bound([docId], [docId, []])
-    const req = tx.objectStore(CONFIRMED).getAll(range)
-    req.onsuccess = () => {
-      /** @type {Record<string, number>} */
-      const out = {}
-      for (const row of /** @type {any[]} */ (req.result) || []) {
-        out[String(row.replica)] = row.seq
-      }
-      resolve(out)
-    }
-    req.onerror = () => reject(req.error)
-  })
-}
-
-/**
- * Advance a replica's confirmed floor by one, if this seq is the next one.
- *
- * The read and the write are one transaction, so concurrent callers cannot
- * both see the same floor and leapfrog. A seq that is not exactly `floor + 1`
- * is ignored: either it is already covered, or there is a hole below it — and
- * the whole point is that a hole must not be stepped over.
- * @param {string} docId
- * @param {number} replica
- * @param {number} seq
- * @returns {Promise<number>} the floor after the attempt
- */
-export async function raiseConfirmed(docId, replica, seq) {
-  const db = await openDB()
-  if (!hasConfirmed(db)) return 0
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(CONFIRMED, 'readwrite')
-    const store = tx.objectStore(CONFIRMED)
-    let floor = 0
-    const req = store.get([docId, replica])
-    req.onsuccess = () => {
-      floor = Number(req.result?.seq) || 0
-      if (seq === floor + 1) {
-        store.put({ docId, replica, seq })
-        floor = seq
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite')
+    const store = tx.objectStore(STORE)
+    for (const { replica, seq } of ids) {
+      const req = store.get([docId, seq, replica])
+      req.onsuccess = () => {
+        const row = req.result
+        if (row && row.acked !== true) store.put({ ...row, acked: true })
       }
     }
-    tx.oncomplete = () => resolve(floor)
+    tx.oncomplete = () => resolve(undefined)
     tx.onerror = () => reject(tx.error)
   })
 }
 
 /**
- * Force a replica's confirmed floor, past a hole that two full replays could
- * not fill. This is the one place the floor may skip a seq: the op is
- * genuinely gone from the server, and continuing to ask for it would re-download
- * the replica's whole tail on every connect, for ever. Monotonic — never moves
- * backwards.
+ * The stored payloads for a set of `"replica:seq"` keys. The skip set needs them:
+ * a skipped op has to be mergeable *after* the fact when the document turns out
+ * not to validate without it.
  * @param {string} docId
- * @param {number} replica
- * @param {number} seq
- * @returns {Promise<number>} the floor after the write
+ * @param {string[]} gids
+ * @returns {Promise<Map<string, Uint8Array>>}
  */
-export async function setConfirmed(docId, replica, seq) {
+export async function cachedPayloads(docId, gids) {
+  /** @type {Map<string, Uint8Array>} */
+  const out = new Map()
+  if (gids.length === 0) return out
   const db = await openDB()
-  if (!hasConfirmed(db)) return 0
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(CONFIRMED, 'readwrite')
-    const store = tx.objectStore(CONFIRMED)
-    let floor = 0
-    const req = store.get([docId, replica])
-    req.onsuccess = () => {
-      floor = Number(req.result?.seq) || 0
-      if (seq > floor) {
-        store.put({ docId, replica, seq })
-        floor = seq
+    const tx = db.transaction(STORE, 'readonly')
+    const store = tx.objectStore(STORE)
+    for (const gid of gids) {
+      const [replica, seq] = String(gid).split(':').map(Number)
+      const req = store.get([docId, seq, replica])
+      req.onsuccess = () => {
+        if (req.result) out.set(String(gid), req.result.payload)
       }
+      req.onerror = () => {}
     }
-    tx.oncomplete = () => resolve(floor)
+    tx.oncomplete = () => resolve(out)
     tx.onerror = () => reject(tx.error)
   })
 }

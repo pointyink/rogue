@@ -110,8 +110,11 @@ describe('no lost ops (local write failures)', () => {
     await settle(200) // bootstrap → reconcile → sync_done → replay
 
     expect(b.model.applied.has('12:1')).toBe(true) // the local doc keeps the edit
-    // Not claimed: no ack ever arrived, so the floor never covered it.
-    expect(lastSince()['12']).toBeUndefined()
+    // Claimed, because it *is* cached: `since` is the max cached seq. Safe only
+    // because the row is unacked, so it is reconciled into the queue and resent —
+    // which is the next assertion. Claiming what you have and resending what the
+    // server has not confirmed are complementary, not a contradiction.
+    expect(lastSince()['12']).toBe(1)
     // …and not stranded either: reconcile put it back in the queue and the
     // reconnect's replay got it to the server.
     hub.flush(docId)

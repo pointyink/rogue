@@ -20,9 +20,8 @@ import { enqueue, ackMany, pendingFor, pendingCount as pendingCountOp, clearDoc 
 import {
   cacheOp,
   cachedRows,
-  confirmedFloors,
-  raiseConfirmed,
-  setConfirmed,
+  maxSeqPerReplica,
+  markAcked,
   clearDoc as clearCacheDoc,
 } from './doc-cache.js'
 import { advanceWatermark, mergeAndAdvance, appendSince } from './checkpoint.js'
@@ -167,41 +166,26 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
   /** @type {Record<string, number>} */
   const watermark = {}
 
-  // Per-replica *confirmed floor*: the highest seq n such that the server is
-  // known to hold every op 1..n. This — not the watermark — is what `since` is
-  // built from, because the two answer different questions. The watermark says
-  // "the highest op I applied", which can be above a hole (so `since` would
-  // skip it) or above an op the server never received (so `since` would claim
-  // it). The floor only moves when the server has told us it holds the next op
-  // in the sequence: it streamed it, or it acked it. A hole freezes the floor,
-  // which is exactly what makes the next sync ask for the hole.
+  // Per-replica `since`: the highest seq this client has *cached* for that
+  // replica. `(replica, seq)` is a Lamport clock, so seqs have gaps by design —
+  // a contiguous floor can never advance past the first one, and `since` would
+  // then re-stream the replica on every connect (which is what 0.4.x did).
+  // A count, not a floor, is how a hole is detected (see the plan doc); the max
+  // is only "don't ask for what I already have".
+  //
+  // It is derived from the cached rows (`maxSeqPerReplica`) and advanced here
+  // after a row is written, so it can never claim an op that is not on disk.
   /** @type {Record<string, number>} */
-  const floors = {}
+  const maxSeen = {}
 
   /**
-   * Group ids whose cache write failed. An ack must not advance the floor for
-   * one of these: the server has the op, but this client could not cache it, so
-   * after a reload it cannot replay it — and if `since` moved past it the server
-   * would never send it back. Leaving the floor below makes the server re-send
-   * it on the next connect, which re-caches and confirms it.
-   * @type {Set<string>}
-   */
-  const uncached = new Set()
-
-  /**
-   * Move a replica's confirmed floor forward, if this is the next op.
-   * Persisted in the doc-cache DB so a reload resumes from it; a failed write
-   * only costs a re-download.
+   * Record that an op is now cached, so `since` need not ask for it again.
+   * Monotonic; never persisted — it is re-derived from the rows on load.
    * @param {number} replica
    * @param {number} seq
    */
-  function confirm(replica, seq) {
-    if (!persist) return
-    if (seq !== (floors[replica] ?? 0) + 1) return
-    floors[replica] = seq
-    raiseConfirmed(docId, replica, seq).catch((err) =>
-      console.error('[sync-client] confirm write failed:', err),
-    )
+  function noteCached(replica, seq) {
+    if (seq > (maxSeen[replica] ?? -1)) maxSeen[replica] = seq
   }
 
   /** @type {Set<string>} */
@@ -275,12 +259,11 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
    * @param {string} replica
    */
   function giveUpOn(replica) {
+    // Stop asking for a hole two replays could not fill. In-memory only: it is
+    // re-derived from the rows on the next load, which is where a genuinely
+    // missing op should be noticed again (by the count, not by a floor).
     const max = watermark[replica] ?? 0
-    if (max <= (floors[replica] ?? 0)) return
-    floors[replica] = max
-    setConfirmed(docId, Number(replica), max).catch((err) =>
-      console.error('[sync-client] floor save failed:', err),
-    )
+    noteCached(Number(replica), max)
   }
 
   /**
@@ -348,14 +331,13 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
     completedBytes += payload.byteLength
     reportProgress(false)
     if (persist && cache) {
-      // An op the server streamed is one the server holds, so it may move the
-      // confirmed floor — but only once it is safely in the cache, or a reload
-      // would resume above an op it cannot replay.
+      // Note it only once the row exists, so `since` can never claim an op this
+      // client cannot replay. Outcome does not matter: a parked or rejected op
+      // is still ours, and asking for it again would be pure waste.
       cacheOp(docId, payload)
         .then(() => {
-          if (outcome === 'parked' || outcome === 'deferred') return
           const id = groupParts(payload)
-          if (id) confirm(id.replica, id.seq)
+          if (id) noteCached(id.replica, id.seq)
         })
         .catch((err) => console.error('[sync-client] cache write failed:', err))
     }
@@ -435,18 +417,18 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
         try {
           const ack = ackV0.decode(body)
           const ids = ack.group_ids.map((id) => `${id.replica_id}:${id.sequence}`)
-          for (const group of ack.group_ids) {
-            const gid = `${group.replica_id}:${group.sequence}`
-            // Cached already: the floor may move. Not cached (this write
-            // failed): leave the floor below it, so the next connect re-sends
-            // it and the cache is repaired. The oplog row still goes.
-            if (uncached.delete(gid)) continue
-            confirm(group.replica_id, group.sequence)
-          }
+          // Nothing to advance: a cached row moved `since` when it was written.
           if (ids.length > 0) {
+            // Two records of the same fact: the queue (oplog) drops it, and the
+            // cache row marks it confirmed so a reload can tell pending from
+            // settled. See plan-sync-model.md.
             ackMany(docId, ids).catch((err) =>
               console.error('[sync-client] ack drop failed:', err),
             )
+            markAcked(
+              docId,
+              ack.group_ids.map((g) => ({ replica: g.replica_id, seq: g.sequence })),
+            ).catch((err) => console.error('[sync-client] ack mark failed:', err))
           }
         } catch (err) {
           console.error('[sync-client] bad ack frame:', err)
@@ -548,7 +530,7 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
     if (destroyed) return
 
     replaying = new Set(incomplete)
-    const url = appendSince(wsUrl, floors, incomplete)
+    const url = appendSince(wsUrl, maxSeen, incomplete)
     ws = new WebSocket(url, [WS_PROTOCOL, token])
     ws.binaryType = 'arraybuffer'
 
@@ -600,9 +582,10 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
         if (persist) {
           try {
             await cacheOp(docId, payload, { own: true })
+            const parts = groupParts(payload)
+            if (parts) noteCached(parts.replica, parts.seq)
           } catch (err) {
             console.error('[sync-client] cache write failed:', err)
-            if (id) uncached.add(id)
           }
         }
         if (id) await enqueue(docId, id, payload)
@@ -646,10 +629,9 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
       connect()
       return
     }
-    // The floors first: `connect` below needs them, and they are what makes a
-    // reload resume instead of re-downloading.
+    // What we already have, per replica, before `connect` asks for the rest.
     try {
-      Object.assign(floors, await confirmedFloors(docId))
+      Object.assign(maxSeen, await maxSeqPerReplica(docId))
     } catch (err) {
       console.error('[sync-client] floor load failed:', err)
     }
@@ -711,7 +693,9 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
         if (!row.own) continue
         const id = groupParts(row.payload)
         if (!id) continue
-        if (id.seq <= (floors[id.replica] ?? 0)) continue
+        // Only ops the server has not confirmed: an acked one is already there,
+        // and re-sending every own op on every load would be a flood.
+        if (row.acked) continue
         const groupId = `${id.replica}:${id.seq}`
         if (queued.has(groupId)) continue
         await enqueue(docId, groupId, row.payload)

@@ -108,15 +108,16 @@ export function nodeSpan(rope, node) {
  * @property {() => void} [onDocTooLarge] Called when an edit can't be applied
  *   because the document has reached its storage capacity. The edit is reverted
  *   (the CRDT is left untouched).
- * @property {Iterable<string>} [rejectedOps] Ops this client already decided it
- *   cannot render, as `"replica:seq"` keys from a previous session. They are not
- *   merged, so a load does not walk back over them again. The host owns the
- *   storage (see `onRejectOps`), including invalidating it when the engine's
- *   validator changes.
+ * @property {Array<{ gid: string, payload: Uint8Array }>} [skipOps] Ops a previous
+ *   session decided it cannot render, with their payloads. They are not merged,
+ *   so a load does not walk back over them — but the payloads are required: if
+ *   the resulting document does not validate, the skip set is wrong for *this*
+ *   document (an op other ops depend on, or a validator fix) and they have to be
+ *   merged after all. See `endLoad`.
  * @property {(gids: string[]) => void} [onRejectOps] Called with the key of every
  *   op the engine decides it cannot render — a load walk-back, or an op rejected
- *   on apply. Pair it with `rejectedOps` to make the verdict durable; without it
- *   every load pays the walk-back again.
+ *   on apply. The host persists these and passes them back as `skipOps`. Ops are
+ *   never deleted; a rejection is only a decision not to apply one.
  * @property {(info: { html: string, normalized: string }) => void} [onBadEdit]
  *   Called when a local edit would mint an op whose HTML the browser cannot
  *   represent — it does not round-trip through `innerHTML`. Such an op renders
@@ -242,7 +243,7 @@ export async function createRogueNode({
   onOpTooLarge,
   onDocTooLarge,
   onBadEdit,
-  rejectedOps,
+  skipOps,
   onRejectOps,
   sizeWarn,
   onSizeWarning,
@@ -1897,7 +1898,14 @@ export async function createRogueNode({
   /** Group ids of ops that were rejected (produced invalid HTML). Seeded with
    *  the host's durable verdict so a load does not re-discover it. */
   const rejected = new Set();
-  for (const key of rejectedOps ?? []) rejected.add(String(key));
+  /** The skipped ops' payloads, kept so `endLoad` can undo the skip if the
+   *  document does not validate without them. @type {Map<string, Uint8Array>} */
+  const skipped = new Map();
+  for (const op of skipOps ?? []) {
+    const key = String(op.gid);
+    rejected.add(key);
+    skipped.set(key, op.payload);
+  }
 
   /** Add a rejection and tell the host, so it can make the verdict durable.
    *  @param {string} key */
@@ -2331,6 +2339,24 @@ export async function createRogueNode({
     endLoad() {
       if (!loading) return;
       loading = false;
+      // The persisted skip set is a hypothesis: right for the document it was
+      // formed on, possibly wrong for this one (an op that later ops depend on,
+      // or a validator that has since changed). Validate once; if it fails, the
+      // hypothesis was wrong — merge the skipped ops and let the walk-back decide.
+      // recoverLoad always ends at a valid prefix, so this can never leave the
+      // document empty.
+      if (!validateHtml(crdt.render() ?? "", editorRoot) && skipped.size > 0) {
+        for (const [key, payload] of skipped) {
+          skipped.delete(key);
+          rejected.delete(key);
+          const merged = crdt.merge(payload);
+          if (merged > 0) {
+            const [replica, seq] = key.split(":").map(Number);
+            trackApplied({ replica, seq }, payload);
+          }
+        }
+        skipped.clear();
+      }
       // Do NOT drain parked ops here: a parked op's gid can sort below the head,
       // and appending it to the CRDT's application-order stack would break the
       // sorted-tail assumption the out-of-order path relies on. Parked ops are

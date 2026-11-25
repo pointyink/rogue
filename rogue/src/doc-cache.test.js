@@ -5,9 +5,7 @@ import {
   cacheOp,
   cachedOps,
   cachedRows,
-  confirmedFloors,
-  raiseConfirmed,
-  setConfirmed,
+  maxSeqPerReplica,
   rejectedGids,
   addRejectedGid,
   clearDoc,
@@ -92,57 +90,28 @@ describe('doc-cache', () => {
   })
 })
 
-describe('confirmed floor', () => {
-  it('starts empty, so a fresh client asks for everything', async () => {
-    expect(await confirmedFloors('floor-fresh')).toEqual({})
+describe('since (max seq per replica)', () => {
+  it('is empty for a fresh doc, so the client asks for everything', async () => {
+    expect(await maxSeqPerReplica('since-fresh')).toEqual({})
   })
 
-  it('advances one seq at a time and refuses to step over a hole', async () => {
-    const doc = 'floor-hole'
-    expect(await raiseConfirmed(doc, 1, 1)).toBe(1)
-    // 2 never arrived; 3 must not move the floor past it.
-    expect(await raiseConfirmed(doc, 1, 3)).toBe(1)
-    // 2 arriving lets the run continue.
-    expect(await raiseConfirmed(doc, 1, 2)).toBe(2)
-    // A duplicate/n earlier seq is a no-op.
-    expect(await raiseConfirmed(doc, 1, 2)).toBe(2)
-    // 3 was already seen, but the floor only moves on the *next* seq; the
-    // server re-sends it rather than the client remembering it (over-fetch is
-    // the safe direction), and re-receiving it advances the floor.
-    expect(await raiseConfirmed(doc, 1, 3)).toBe(3)
-  })
-
-  it('keeps replicas independent and persists them', async () => {
-    const doc = 'floor-replicas'
-    await raiseConfirmed(doc, 1, 1)
-    await raiseConfirmed(doc, 2, 1)
-    await raiseConfirmed(doc, 2, 2)
-
-    expect(await confirmedFloors(doc)).toEqual({ 1: 1, 2: 2 })
-  })
-
-  it('never moves backwards, including through setConfirmed', async () => {
-    const doc = 'floor-monotonic'
-    await raiseConfirmed(doc, 1, 1)
-    await raiseConfirmed(doc, 1, 2)
-
-    expect(await setConfirmed(doc, 1, 9)).toBe(9) // explicit gap acceptance
-    expect(await setConfirmed(doc, 1, 3)).toBe(9) // cannot rewind
-    expect(await raiseConfirmed(doc, 1, 4)).toBe(9) // nor by one from behind
-    expect(await confirmedFloors(doc)).toEqual({ 1: 9 })
-  })
-
-  it('clearDoc drops the floor with the history', async () => {
-    // They must go together: a floor without its history would skip ops on the
-    // next sync, and the doc would silently lose its beginning.
-    const doc = 'floor-clear'
+  it('is the maximum per replica, gaps and all', async () => {
+    // `seq` is a Lamport clock: 1, 14, 27 is a normal replica. A contiguous
+    // floor can never pass the first gap, which is why `since` is a maximum.
+    const doc = 'since-gaps'
     await cacheOp(doc, opPayload(1, 1))
-    await raiseConfirmed(doc, 1, 1)
+    await cacheOp(doc, opPayload(1, 14))
+    await cacheOp(doc, opPayload(1, 27))
+    await cacheOp(doc, opPayload(2, 58))
 
+    expect(await maxSeqPerReplica(doc)).toEqual({ 1: 27, 2: 58 })
+  })
+
+  it('goes away with the history', async () => {
+    const doc = 'since-clear'
+    await cacheOp(doc, opPayload(1, 9))
     await clearDoc(doc)
-
-    expect(await cachedOps(doc)).toHaveLength(0)
-    expect(await confirmedFloors(doc)).toEqual({})
+    expect(await maxSeqPerReplica(doc)).toEqual({})
   })
 })
 

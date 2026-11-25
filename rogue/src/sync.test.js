@@ -908,7 +908,9 @@ describe('createRogueNode', () => {
       const node = await createRogueNode({
         element: el,
         replicaId: 1,
-        rejectedOps: [known],
+        // The payload travels with the gid: it is what lets the engine undo the
+        // skip if the document does not validate without it.
+        skipOps: [{ gid: known, payload: payloads[1] }],
         onRejectOps: (gids) => reports.push(gids),
       })
       node.beginLoad()
@@ -920,6 +922,29 @@ describe('createRogueNode', () => {
       expect(reports).toHaveLength(0)
       expect(validHtml(el.innerHTML)).toBe(true)
       expect(el.innerHTML).toContain('<p>1</p>')
+    })
+
+    it('undoes a skip set that does not validate instead of emptying the doc', async () => {
+      // Skipping an op that other ops depend on parks them all. The skip set is a
+      // hypothesis: when it fails to validate, the engine merges the skipped ops
+      // and lets the walk-back decide, so a bad verdict can cost time but never
+      // the document.
+      const payloads = makeLog(['<p>1</p>', '</p>', '<p>3</p>'])
+      const v = new DataView(payloads[0].buffer, payloads[0].byteOffset, payloads[0].byteLength)
+      const root = `${v.getUint16(0, true)}:${v.getUint32(2, true)}`
+      const el = makeEditor()
+      const node = await createRogueNode({
+        element: el,
+        replicaId: 1,
+        skipOps: [{ gid: root, payload: payloads[0] }],
+      })
+      node.beginLoad()
+      for (const p of payloads) node.mergeOp(p)
+      node.endLoad()
+
+      expect(el.innerHTML).not.toBe('')
+      expect(validHtml(el.innerHTML)).toBe(true)
+      expect(node.getString()).toContain('<p>1</p>')
     })
 
     it('drains a parked op below the head after a clean load', async () => {

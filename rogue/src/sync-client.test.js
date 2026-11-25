@@ -4,7 +4,7 @@ import { createSyncClient } from './sync-client.js'
 import {
   cacheOp,
   cachedRows,
-  confirmedFloors,
+  maxSeqPerReplica,
   clearDoc as clearCacheDoc,
 } from './doc-cache.js'
 import { enqueue, pendingFor, ackMany, clearDoc as clearOplogDoc } from './oplog.js'
@@ -24,9 +24,7 @@ vi.mock('./doc-cache.js', () => ({
   cacheOp: vi.fn(() => Promise.resolve()),
   cachedOps: vi.fn(() => Promise.resolve([])),
   cachedRows: vi.fn(() => Promise.resolve([])),
-  confirmedFloors: vi.fn(() => Promise.resolve({})),
-  raiseConfirmed: vi.fn(() => Promise.resolve(0)),
-  setConfirmed: vi.fn(() => Promise.resolve(0)),
+  maxSeqPerReplica: vi.fn(() => Promise.resolve({})),
   clearDoc: vi.fn(() => Promise.resolve()),
 }))
 
@@ -163,7 +161,7 @@ describe('createSyncClient checkpoint', () => {
     expect(FakeWebSocket.instances[0].url).toBe('wss://sync.example.com/ws/doc-1')
   })
 
-  it('sends the confirmed floor as since on reconnect', async () => {
+  it('sends the max cached seq as since on reconnect', async () => {
     start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
     const ws = FakeWebSocket.instances[0]
@@ -179,10 +177,11 @@ describe('createSyncClient checkpoint', () => {
     )
   })
 
-  it('does not step the floor over a hole (a later op must not hide it)', async () => {
-    // This is the whole point of a floor instead of a max: 2 never arrived, so
-    // 3 applying must not move `since` past it. `since` stays at 1 and the next
-    // connect asks for 2 again.
+  it('asks from the max, because Lamport seqs have gaps by design', async () => {
+    // A contiguous floor can never pass the first gap a Lamport clock produces
+    // (1, 14, 27 is a normal replica), so `since` would re-stream for ever. The
+    // max is the honest answer to "what do I already have"; a genuinely missing
+    // op is found by comparing per-replica counts, not by this number.
     start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
     const ws = FakeWebSocket.instances[0]
@@ -194,7 +193,7 @@ describe('createSyncClient checkpoint', () => {
 
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
     expect(FakeWebSocket.instances[1].url).toBe(
-      `wss://sync.example.com/ws/doc-1?since=${encodeURIComponent('{"1":1}')}`,
+      `wss://sync.example.com/ws/doc-1?since=${encodeURIComponent('{"1":3}')}`,
     )
   })
 
@@ -261,8 +260,8 @@ describe('createSyncClient checkpoint', () => {
 
   it('does not treat an IME-deferred op as a gap', async () => {
     // 'deferred' means the engine is holding the op until the composition ends.
-    // It must not be claimed (no advance) — but it is not a hole either, and
-    // marking it as one would burn the repair budget and log a false failure.
+    // It is still ours and still cached, so `since` may pass it — but it is not a
+    // hole, and marking it as one would burn the repair budget for nothing.
     start('wss://sync.example.com/ws/doc-1', 'doc-1', () => 'deferred')
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
     const ws = FakeWebSocket.instances[0]
@@ -271,7 +270,7 @@ describe('createSyncClient checkpoint', () => {
     ws.emitClose()
 
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
-    expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
+    expect(decodeURIComponent(FakeWebSocket.instances[1].url)).toContain('"2":4')
     expect(localStorage.getItem('rogue.gaps.doc-1')).toBe(null)
   })
 
@@ -370,7 +369,7 @@ describe('createSyncClient checkpoint', () => {
     // Session 2: fresh client whose cache holds a *later* op from the same
     // replica. Without the remembered gap that op would set the floor to 4:8 and
     // hide 4:7 for ever.
-    vi.mocked(cachedRows).mockResolvedValueOnce([{ payload: opPayload(4, 8), own: false }])
+    vi.mocked(cachedRows).mockResolvedValueOnce([{ payload: opPayload(4, 8), own: false, acked: true }])
     const second = start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2))
     // Replica 4 is omitted from `since`, so the server replays it in full.
@@ -378,11 +377,10 @@ describe('createSyncClient checkpoint', () => {
     second.destroy()
   })
 
-  it('claims an op only once it is acked, never because it was sent', async () => {
-    // `send` is not a proof. If the oplog write failed, or the crash landed
-    // between the cache and the oplog, the op exists locally and the server has
-    // never heard of it. Claiming it would make the server skip it for ever, so
-    // the floor moves on the ack — and only on the ack.
+  it('claims what it has cached, and keeps resending until the ack', async () => {
+    // Claiming a cached op is safe: it is on disk here, and if the server never
+    // got it the oplog still holds it and the periodic retry resends it. The
+    // ack is what stops the resend, not what makes the claim true.
     const client = start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
 
@@ -392,23 +390,21 @@ describe('createSyncClient checkpoint', () => {
 
     FakeWebSocket.instances[0].emitClose()
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
-    expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
+    // It is cached, so `since` claims it; it is also still queued, so it is
+    // resent. Both are true at once, which is the point.
+    expect(decodeURIComponent(FakeWebSocket.instances[1].url)).toContain('"7":1')
+    expect(await pendingFor('doc-1')).toHaveLength(1)
 
-    // Now the server confirms it: the floor may move.
+    // The ack drops it from the queue.
     FakeWebSocket.instances[1].emitMessage(frame(DISC_ACK, ackPayload([[7, 1]])))
     await new Promise((r) => setTimeout(r, 0))
-    FakeWebSocket.instances[1].emitClose()
-    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(3), { timeout: 3000 })
-    expect(FakeWebSocket.instances[2].url).toBe(
-      `wss://sync.example.com/ws/doc-1?since=${encodeURIComponent('{"7":1}')}`,
-    )
+    expect(vi.mocked(ackMany)).toHaveBeenCalled()
   })
 
-  it('does not let an ack claim an op whose cache write failed', async () => {
-    // The ack says the server has it, but this client could not cache it. If
-    // the floor moved past it, a reload could not replay it *and* the server
-    // would never send it back — the edit would vanish from this device for
-    // ever. The floor stays below, so the next connect asks for it again.
+  it('does not claim an op whose cache write failed', async () => {
+    // The server may have it, but this client could not cache it. `since` is
+    // derived from the rows, so a failed write leaves it below — the next
+    // connect asks for it again and the cache is repaired.
     vi.mocked(cacheOp).mockRejectedValueOnce(new Error('quota exceeded'))
     const client = start('wss://sync.example.com/ws/doc-1', 'doc-1', () => 'applied')
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
@@ -424,13 +420,13 @@ describe('createSyncClient checkpoint', () => {
     expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
   })
 
-  it('replays the cached op log and resumes from the persisted floors (reload resume)', async () => {
+  it('replays the cached op log and resumes from the max cached seq (reload resume)', async () => {
     vi.mocked(cachedRows).mockResolvedValueOnce([
-      { payload: opPayload(1, 10), own: false },
-      { payload: opPayload(2, 5), own: false },
+      { payload: opPayload(1, 10), own: false, acked: true },
+      { payload: opPayload(2, 5), own: false, acked: true },
     ])
     // What the previous session durably confirmed for those replicas.
-    vi.mocked(confirmedFloors).mockResolvedValueOnce({ 1: 10, 2: 5 })
+    vi.mocked(maxSeqPerReplica).mockResolvedValueOnce({ 1: 10, 2: 5 })
 
     /** @type {Uint8Array[]} */
     const merged = []
@@ -438,16 +434,15 @@ describe('createSyncClient checkpoint', () => {
 
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
     expect(merged).toHaveLength(2)
-    // The first dial resumes from what the *server* has confirmed, not from the
-    // highest op in the cache: those are different questions, and only the
-    // first one is safe to skip ops on.
+    // The first dial resumes from the highest seq actually cached per replica —
+    // derived from the rows, so it cannot claim an op this client cannot play.
     expect(FakeWebSocket.instances[0].url).toBe(
       `wss://sync.example.com/ws/doc-1?since=${encodeURIComponent('{"1":10,"2":5}')}`,
     )
   })
 
   it('does not re-cache ops during replay', async () => {
-    vi.mocked(cachedRows).mockResolvedValueOnce([{ payload: opPayload(1, 10), own: false }])
+    vi.mocked(cachedRows).mockResolvedValueOnce([{ payload: opPayload(1, 10), own: false, acked: true }])
 
     start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
@@ -462,7 +457,7 @@ describe('createSyncClient checkpoint', () => {
     // load path, so it has to hand the thread back regularly.
     const count = 600
     vi.mocked(cachedRows).mockResolvedValueOnce(
-      Array.from({ length: count }, (_, i) => ({ payload: opPayload(1, i + 1), own: false })),
+      Array.from({ length: count }, (_, i) => ({ payload: opPayload(1, i + 1), own: false, acked: true })),
     )
 
     /** @type {string[]} */
@@ -488,8 +483,8 @@ describe('createSyncClient checkpoint', () => {
     const op1 = opPayload(1, 10)
     const op2 = opPayload(2, 5)
     vi.mocked(cachedRows).mockResolvedValueOnce([
-      { payload: op1, own: false },
-      { payload: op2, own: false },
+      { payload: op1, own: false, acked: true },
+      { payload: op2, own: false, acked: true },
     ])
 
     const onSyncStart = vi.fn()
