@@ -87,6 +87,40 @@ describe('doc-cache', () => {
 
     const rows = await cachedRows('doc-own')
     expect(rows.map((r) => r.own)).toEqual([true, false])
+    // Remote rows are acked on arrival; own rows are not until the server says so.
+    expect(rows.map((r) => r.acked)).toEqual([false, true])
+  })
+
+  it('treats a legacy own row as unacked, so a stranded op is resent', async () => {
+    // Rows written before 0.5.0 have no `acked` field, and there is no DB
+    // version bump to backfill them (an upgrade can wedge a second tab). An own
+    // row from 0.4.x may be exactly the cache-only orphan `acked` exists to
+    // find — a duplicate send is idempotent, a stranded op is lost content.
+    const doc = 'legacy-acked'
+    await cacheOp(doc, opPayload(1, 1), { own: true }) // creates the DB/store
+    const db = await new Promise((resolve, reject) => {
+      const req = indexedDB.open('rogue-doc-cache')
+      req.onsuccess = () => resolve(req.result)
+      req.onerror = () => reject(req.error)
+    })
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction('ops', 'readwrite')
+      tx.objectStore('ops').put({
+        docId: doc,
+        seq: 7,
+        replica: 5,
+        payload: opPayload(5, 7),
+        own: true,
+        // no `acked`
+      })
+      tx.oncomplete = () => resolve(undefined)
+      tx.onerror = () => reject(tx.error)
+    })
+    db.close()
+
+    const rows = await cachedRows(doc)
+    expect(rows.filter((r) => r.own).map((r) => r.acked)).toEqual([false, false])
+    expect(rows).toHaveLength(2)
   })
 })
 

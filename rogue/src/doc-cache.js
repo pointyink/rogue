@@ -5,29 +5,24 @@
 // can replay the log into a fresh CRDT and resume without re-downloading the
 // full history — and a previously-opened doc reads offline.
 //
-// It also stores the **confirmed floor**: for each replica, the highest seq n
-// such that this client is sure the server holds *every* op 1..n. That is what
-// `since` is built from, and it is deliberately not derived from the cache:
-// the cache says "I applied it", which is not the same as "the server has it"
-// (an op can be cached and still never sent). Advancing `since` over a cached
-// op the server never received hides it for ever.
+// One row per op, and everything the sync client needs is derived from it:
 //
-// So the floor only moves **after** the thing it claims is durable:
-//   • an op streamed from the server → after its cache write commits;
-//   • an op we authored → only when its ack arrives (the ack means "stored").
-// Both live in this DB, so losing one loses the other; a stale floor can cause
-// a re-download, never a skipped op.
+//   • `since`       per replica, the max cached seq. `seq` is a Lamport clock,
+//                   so this is a maximum, not a coverage count — gaps are by
+//                   design and a contiguous floor can never pass the first one,
+//                   which re-streamed the replica on every connect (0.4.x).
+//   • `acked`       the server has this op. Remote ops arrive acked; own ops
+//                   start unacked and are marked by the ack. `own && !acked` is
+//                   the send queue, so "what may I skip" and "what must I
+//                   resend" stop being the same number.
+//   • `rejected`    a hint that this engine cannot render the op, per engine
+//                   version. Never a deletion: the row is the only copy of the
+//                   author's text.
 //
 // Key is `[docId, seq, replica]` (composite), which sorts naturally into the
 // CRDT's canonical (seq, replica) order for replay. `put` on the same key is
 // an idempotent overwrite, so re-caching an op is a no-op and duplicates are
-// impossible.
-//
-// The floor advances by exactly one: a hole freezes it, which is the point —
-// the next sync asks for the hole instead of skipping past it. Out-of-order
-// acks are therefore ignored rather than buffered; the server re-sends
-// everything above the floor, so the ledger heals itself at the cost of one
-// re-download. Over-fetching is the safe direction.
+// impossible. See docs/plan-sync-model.md in the server repo.
 
 import * as nodeIdV0 from '@pointyink/serde/node_id_v0'
 
@@ -235,7 +230,11 @@ export async function cachedRows(docId) {
         items.map((it) => ({
           payload: it.payload,
           own: it.own === true,
-          acked: it.acked !== false,
+          // Rows written before 0.5.0 have no `acked`. A remote row was stored by
+          // the server by definition; an *own* row might be the cache-only
+          // orphan this flag exists to find, so default it to unacked — a
+          // duplicate send is idempotent, a stranded op is lost content.
+          acked: it.acked === undefined ? it.own !== true : it.acked === true,
         })),
       )
     }

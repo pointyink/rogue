@@ -252,18 +252,17 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
   let replaying = new Set()
 
   /**
-   * Stop re-requesting a hole that two full replays could not fill. The floor
-   * jumps to the highest op we have for that replica, which is the same
-   * acceptance the max-watermark made implicitly — but now it is an explicit,
-   * logged decision rather than the default.
+   * Stop re-requesting a hole that two full replays could not fill.
+   *
+   * The repair loop is driven by `incomplete` (it is what omits a replica from
+   * `since`), so dropping it here is the whole mechanism. Deliberately does NOT
+   * advance `since`: `since` is derived from the rows, and moving it past an op
+   * this client does not have would tell the server to skip content it still
+   * holds. A genuine leaf gap is found by the per-replica count instead.
    * @param {string} replica
    */
   function giveUpOn(replica) {
-    // Stop asking for a hole two replays could not fill. In-memory only: it is
-    // re-derived from the rows on the next load, which is where a genuinely
-    // missing op should be noticed again (by the count, not by a floor).
-    const max = watermark[replica] ?? 0
-    noteCached(Number(replica), max)
+    if (incomplete.delete(replica)) saveRepairState()
   }
 
   /**

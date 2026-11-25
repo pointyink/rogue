@@ -2338,25 +2338,27 @@ export async function createRogueNode({
      *  boundary op, and replay the tail (recoverLoad). Idempotent. */
     endLoad() {
       if (!loading) return;
-      loading = false;
       // The persisted skip set is a hypothesis: right for the document it was
       // formed on, possibly wrong for this one (an op that later ops depend on,
       // or a validator that has since changed). Validate once; if it fails, the
       // hypothesis was wrong — merge the skipped ops and let the walk-back decide.
       // recoverLoad always ends at a valid prefix, so this can never leave the
       // document empty.
-      if (!validateHtml(crdt.render() ?? "", editorRoot) && skipped.size > 0) {
-        for (const [key, payload] of skipped) {
-          skipped.delete(key);
-          rejected.delete(key);
-          const merged = crdt.merge(payload);
-          if (merged > 0) {
-            const [replica, seq] = key.split(":").map(Number);
-            trackApplied({ replica, seq }, payload);
-          }
-        }
+      //
+      // The retry goes through applyOp, NOT crdt.merge: a skipped op is normally a
+      // *middle* op, so its gid sorts below the head, and merging it directly
+      // would append it to the CRDT's application-order stack — leaving
+      // group_order unsorted. The next out-of-order op would then sort
+      // appliedGroups and revertTail the wrong groups: the empty-document class of
+      // bug. `loading` stays true so these merges are unvalidated and unrendered
+      // like the rest of the bootstrap; validation below decides.
+      if (skipped.size > 0 && !validateHtml(crdt.render() ?? "", editorRoot)) {
+        const retry = [...skipped.entries()];
         skipped.clear();
+        for (const [key] of retry) rejected.delete(key);
+        for (const [, payload] of retry) applyOp(payload);
       }
+      loading = false;
       // Do NOT drain parked ops here: a parked op's gid can sort below the head,
       // and appending it to the CRDT's application-order stack would break the
       // sorted-tail assumption the out-of-order path relies on. Parked ops are
