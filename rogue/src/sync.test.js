@@ -924,6 +924,40 @@ describe('createRogueNode', () => {
       expect(el.innerHTML).toContain('<p>1</p>')
     })
 
+    it('undoes a skip set by merging through the ordering path', async () => {
+      // The fallback must not merge a skipped op at the head by hand. A skipped
+      // op is normally a MIDDLE op: if it is appended to the CRDT's
+      // application-order stack, group_order is no longer sorted, and the next
+      // out-of-order op reverts the wrong groups — the empty-document bug.
+      const A = rootInsert(2, 1, bytes('<p>a')) // 4 chars
+      const B = rootInsert(2, 5, bytes('</p>')) // 4 chars: closes A
+      const C = rootInsert(2, 9, bytes('<p>c</p>'))
+      const el = makeEditor()
+      const node = await createRogueNode({
+        element: el,
+        replicaId: 1,
+        // Skipping A leaves '</p><p>c</p>' -> invalid, so the fallback runs.
+        skipOps: [{ gid: '2:1', payload: A }],
+      })
+      node.beginLoad()
+      node.mergeOp(A)
+      node.mergeOp(B)
+      node.mergeOp(C)
+      node.endLoad()
+
+      expect(el.innerHTML).toBe('<p>a</p><p>c</p>')
+      expect(node.rope.serialize()).toBe(el.innerHTML)
+
+      // The ledger must be in gid order, which is what the out-of-order path
+      // relies on (it sorts appliedGroups and then reverts the tail by count).
+      // A hand-rolled merge would have produced [B, C, A] here.
+      expect(node.exportOps().map(({ gid }) => `${gid.replica}:${gid.seq}`)).toEqual([
+        '2:1',
+        '2:5',
+        '2:9',
+      ])
+    })
+
     it('undoes a skip set that does not validate instead of emptying the doc', async () => {
       // Skipping an op that other ops depend on parks them all. The skip set is a
       // hypothesis: when it fails to validate, the engine merges the skipped ops
