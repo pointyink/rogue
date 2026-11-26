@@ -5,6 +5,7 @@ import {
   cacheOp,
   cachedRows,
   maxSeqPerReplica,
+  countPerReplica,
   clearDoc as clearCacheDoc,
 } from './doc-cache.js'
 import { enqueue, pendingFor, ackMany, clearDoc as clearOplogDoc } from './oplog.js'
@@ -25,6 +26,7 @@ vi.mock('./doc-cache.js', () => ({
   cachedOps: vi.fn(() => Promise.resolve([])),
   cachedRows: vi.fn(() => Promise.resolve([])),
   maxSeqPerReplica: vi.fn(() => Promise.resolve({})),
+  countPerReplica: vi.fn(() => Promise.resolve({})),
   clearDoc: vi.fn(() => Promise.resolve()),
 }))
 
@@ -112,6 +114,11 @@ const DISC_MULTI_OP = 3
 const DISC_ACK = 4
 const DISC_JSON_ENVELOPE = 5
 
+/** A JSON envelope body, for the server's control frames.
+ *  @param {unknown} obj
+ *  @returns {Uint8Array} */
+const jsonPayload = (obj) => new TextEncoder().encode(JSON.stringify(obj))
+
 /** An ack_v0 payload for a list of [replica, seq] pairs.
  *  @param {Array<[number, number]>} pairs
  *  @returns {Uint8Array}
@@ -159,6 +166,46 @@ describe('createSyncClient checkpoint', () => {
 
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
     expect(FakeWebSocket.instances[0].url).toBe('wss://sync.example.com/ws/doc-1')
+  })
+
+  it('replays a replica when the server reports more ops than the cache has', async () => {
+    // The one loss `since` cannot express: a per-replica maximum cannot see a
+    // hole below it. The server's count is the only signal.
+    vi.mocked(countPerReplica).mockResolvedValueOnce({ 1: 1 })
+    vi.mocked(maxSeqPerReplica).mockResolvedValueOnce({ 1: 3 })
+
+    start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const ws = FakeWebSocket.instances[0]
+
+    // Server says it holds three ops for replica 1; the cache has one.
+    ws.emitMessage(frame(DISC_JSON_ENVELOPE, jsonPayload({ type: 'sync_counts', counts: { 1: { n: 3, max: 3 } } })))
+    ws.emitMessage(frame(DISC_JSON_ENVELOPE, jsonPayload({ type: 'sync_done' })))
+    await new Promise((r) => setTimeout(r, 0))
+    ws.emitClose()
+
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
+    // Omitted from since -> the server replays replica 1 in full.
+    expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
+  })
+
+  it('keeps the fast path when the counts agree', async () => {
+    vi.mocked(countPerReplica).mockResolvedValueOnce({ 1: 3 })
+    vi.mocked(maxSeqPerReplica).mockResolvedValueOnce({ 1: 3 })
+
+    start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const ws = FakeWebSocket.instances[0]
+
+    ws.emitMessage(frame(DISC_JSON_ENVELOPE, jsonPayload({ type: 'sync_counts', counts: { 1: { n: 3, max: 3 } } })))
+    ws.emitMessage(frame(DISC_JSON_ENVELOPE, jsonPayload({ type: 'sync_done' })))
+    await new Promise((r) => setTimeout(r, 0))
+    ws.emitClose()
+
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
+    expect(FakeWebSocket.instances[1].url).toBe(
+      `wss://sync.example.com/ws/doc-1?since=${encodeURIComponent('{"1":3}')}`,
+    )
   })
 
   it('sends the max cached seq as since on reconnect', async () => {
@@ -543,7 +590,11 @@ describe('createSyncClient checkpoint', () => {
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
 
     FakeWebSocket.instances[0].emitMessage(frame(DISC_MULTI_OP, opPayload(1, 10)))
-    expect(vi.mocked(cacheOp)).toHaveBeenCalledWith('doc-1', expect.any(Uint8Array))
+    // Cache writes are serialised on one chain (so the count check can wait for
+    // them), so the call lands a microtask after the merge.
+    await vi.waitFor(() =>
+      expect(vi.mocked(cacheOp)).toHaveBeenCalledWith('doc-1', expect.any(Uint8Array)),
+    )
   })
 
   it('fires onCommentChanged for a comment_changed envelope', async () => {
