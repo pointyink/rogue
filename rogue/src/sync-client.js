@@ -21,6 +21,7 @@ import {
   cacheOp,
   cachedRows,
   maxSeqPerReplica,
+  countPerReplica,
   markAcked,
   clearDoc as clearCacheDoc,
 } from './doc-cache.js'
@@ -196,19 +197,21 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
   // every connect would be a permanent bandwidth loop that never succeeds.
   const MAX_REPAIR_REPLAYS = 2
 
-  /** @returns {{ gone: string[], attempts: Record<string, number> }} */
+  /** @returns {{ gone: string[], attempts: Record<string, number>, countMisses: Record<string, number> }} */
   function loadRepairState() {
     try {
       const raw = globalThis.localStorage?.getItem(repairKey)
-      if (!raw) return { gone: [], attempts: {} }
+      if (!raw) return { gone: [], attempts: {}, countMisses: {} }
       const parsed = JSON.parse(raw)
       // Older/partial shapes degrade to "nothing known".
       return {
         gone: Array.isArray(parsed?.gone) ? parsed.gone.map(String) : [],
         attempts: parsed?.attempts && typeof parsed.attempts === 'object' ? parsed.attempts : {},
+        countMisses:
+          parsed?.countMisses && typeof parsed.countMisses === 'object' ? parsed.countMisses : {},
       }
     } catch {
-      return { gone: [], attempts: {} }
+      return { gone: [], attempts: {}, countMisses: {} }
     }
   }
 
@@ -222,18 +225,38 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
 
   function saveRepairState() {
     try {
-      if (incomplete.size === 0 && repairAttempts.size === 0) {
+      if (incomplete.size === 0 && repairAttempts.size === 0 && Object.keys(countMisses).length === 0) {
         globalThis.localStorage?.removeItem(repairKey)
         return
       }
       globalThis.localStorage?.setItem(
         repairKey,
-        JSON.stringify({ gone: [...incomplete], attempts: Object.fromEntries(repairAttempts) }),
+        JSON.stringify({
+          gone: [...incomplete],
+          attempts: Object.fromEntries(repairAttempts),
+          countMisses,
+        }),
       )
     } catch {
       /* storage unavailable (private mode, server-side replica): in-memory only */
     }
   }
+
+  // Serialises cache writes so the count check below can wait for them: a row
+  // still in flight would look like a missing op and cost a full replay.
+  /** @type {Promise<void>} */
+  let cacheTail = Promise.resolve()
+
+  // What the server says it holds, per replica, from this connection's
+  // `sync_counts`. Compared with the cache at `sync_done`.
+  /** @type {Record<string, {n: number, max: number}> | null} */
+  let serverCounts = null
+
+  // Replicas whose counts disagreed and did not heal after a replay. Kept apart
+  // from `repairAttempts` because that budget is cleared whenever a connection
+  // replays cleanly, which is exactly the case a persistent mismatch survives.
+  /** @type {Record<string, number>} */
+  const countMisses = { ...initialRepair.countMisses }
 
   // Did anything fail to merge on this connection? If not, a full replay of the
   // omitted replicas has healed them.
@@ -297,6 +320,71 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
     saveRepairState()
   }
 
+  /**
+   * Compare the server's per-replica counts with the cache. A server count above
+   * the local one is an op that never arrived — the one failure `since` cannot
+   * express, because a per-replica maximum cannot see a hole below it.
+   *
+   * On a mismatch the replica is omitted from `since` on the next connect, which
+   * replays it in full; merges are idempotent, so that is over-fetch, not risk.
+   * `countMisses` bounds that: a mismatch that survives a replay is not something
+   * more fetching can fix (a failing cache write, a server hole), so it stops
+   * after MAX_REPAIR_REPLAYS and says so instead of re-streaming for ever.
+   */
+  async function verifyCounts() {
+    const expected = serverCounts
+    if (!expected || !persist) return
+    try {
+      await cacheTail
+    } catch {
+      /* the write site logged it */
+    }
+    let local
+    try {
+      local = await countPerReplica(docId)
+    } catch (err) {
+      console.error('[sync-client] count read failed:', err)
+      return
+    }
+    let changed = false
+    for (const [replica, s] of Object.entries(expected)) {
+      const have = local[replica] ?? 0
+      const haveMax = maxSeen[replica] ?? -1
+      if (s.n <= have && s.max <= haveMax) {
+        if (replica in countMisses) {
+          delete countMisses[replica]
+          changed = true
+        }
+        continue
+      }
+      const misses = countMisses[replica] ?? 0
+      // Already given up: say nothing and do nothing. Re-reporting every connect
+      // would grow the counter and the log for ever without changing anything.
+      if (misses > MAX_REPAIR_REPLAYS) continue
+      countMisses[replica] = misses + 1
+      changed = true
+      if (misses + 1 > MAX_REPAIR_REPLAYS) {
+        console.error('[sync-client] ops missing and not repairable by replay', {
+          docId,
+          replica,
+          server: s,
+          cached: have,
+        })
+        continue
+      }
+      if (!incomplete.has(replica)) {
+        incomplete.add(replica)
+        console.warn('[sync-client] missing ops — replaying this replica next connect', {
+          docId,
+          replica,
+          server: s,
+          cached: have,
+        })
+      }
+    }
+    if (changed) saveRepairState()
+  }
+
   /** Merge an op, account for its bytes in the load meter, and (optionally)
    *  append it to the doc cache.
    *  @param {Uint8Array} payload
@@ -325,7 +413,8 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
       // Note it only once the row exists, so `since` can never claim an op this
       // client cannot replay. Outcome does not matter: a parked or rejected op
       // is still ours, and asking for it again would be pure waste.
-      cacheOp(docId, payload)
+      cacheTail = cacheTail
+        .then(() => cacheOp(docId, payload))
         .then(() => {
           const id = groupParts(payload)
           if (id) noteCached(id.replica, id.seq)
@@ -442,6 +531,20 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
           onSyncStart?.(totalBytes)
           return
         }
+        if (msg?.type === 'sync_counts') {
+          // What the server holds per replica. Checked after this connection has
+          // streamed and replayed, so it can only disagree for a real reason.
+          /** @type {Record<string, {n: number, max: number}>} */
+          const counts = {}
+          for (const [replica, v] of Object.entries(msg.counts ?? {})) {
+            const c = /** @type {{n?: unknown, max?: unknown}} */ (v)
+            if (typeof c?.n === 'number' && typeof c?.max === 'number') {
+              counts[replica] = { n: c.n, max: c.max }
+            }
+          }
+          serverCounts = counts
+          return
+        }
         if (msg?.type === 'sync_done') {
           if (!ready) {
             // A replay that merged everything has healed whatever was missing.
@@ -457,6 +560,9 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
               ready = true
               reportProgress(true)
               onReady?.()
+              // After ready: a mismatch only affects the *next* connect, so the
+              // check must not delay the first render.
+              void verifyCounts()
             })
           }
         }
@@ -503,6 +609,9 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
 
   async function connect() {
     if (destroyed) return
+    // A connection that dies before its `sync_counts` must not leave the previous
+    // connection's inventory behind: it would be compared against this one's cache.
+    serverCounts = null
     setStatus('connecting')
     ready = false
     failedThisSync = false

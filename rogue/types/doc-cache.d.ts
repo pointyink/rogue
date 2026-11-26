@@ -22,6 +22,14 @@ export function cacheOp(docId: string, payload: Uint8Array, opts?: {
  */
 export function maxSeqPerReplica(docId: string): Promise<Record<string, number>>;
 /**
+ * How many cached ops this doc has per replica — the client's half of the
+ * server's `sync_counts` report. A server count above this one means an op never
+ * arrived, which `since` (a per-replica maximum) cannot show.
+ * @param {string} docId
+ * @returns {Promise<Record<string, number>>}
+ */
+export function countPerReplica(docId: string): Promise<Record<string, number>>;
+/**
  * Every cached op for a doc, with its provenance, in canonical (seq, replica)
  * order — the order to replay into a fresh CRDT.
  * @param {string} docId

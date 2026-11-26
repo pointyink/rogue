@@ -6,6 +6,7 @@ import {
   cachedOps,
   cachedRows,
   maxSeqPerReplica,
+  countPerReplica,
   rejectedGids,
   addRejectedGid,
   clearDoc,
@@ -146,6 +147,24 @@ describe('since (max seq per replica)', () => {
     await cacheOp(doc, opPayload(1, 9))
     await clearDoc(doc)
     expect(await maxSeqPerReplica(doc)).toEqual({})
+  })
+})
+
+describe('count per replica (the server-facing check)', () => {
+  it('counts rows per replica, gaps and all', async () => {
+    // The server reports how many rows it holds; the client needs the same
+    // number from its own cache. Gaps are normal — only the total matters.
+    const doc = 'counts-basic'
+    await cacheOp(doc, opPayload(1, 1))
+    await cacheOp(doc, opPayload(1, 14))
+    await cacheOp(doc, opPayload(2, 58))
+    await cacheOp(doc, opPayload(3, 3))
+
+    expect(await countPerReplica(doc)).toEqual({ 1: 2, 2: 1, 3: 1 })
+  })
+
+  it('is empty for a doc with nothing cached', async () => {
+    expect(await countPerReplica('counts-empty')).toEqual({})
   })
 })
 

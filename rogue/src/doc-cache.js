@@ -213,6 +213,32 @@ export async function maxSeqPerReplica(docId) {
 }
 
 /**
+ * How many cached ops this doc has per replica — the client's half of the
+ * server's `sync_counts` report. A server count above this one means an op never
+ * arrived, which `since` (a per-replica maximum) cannot show.
+ * @param {string} docId
+ * @returns {Promise<Record<string, number>>}
+ */
+export async function countPerReplica(docId) {
+  const db = await openDB()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readonly')
+    const range = IDBKeyRange.bound([docId], [docId, []])
+    const req = tx.objectStore(STORE).getAllKeys(range)
+    req.onsuccess = () => {
+      /** @type {Record<string, number>} */
+      const out = {}
+      for (const key of /** @type {any[]} */ (req.result) || []) {
+        const replica = String(key[2])
+        out[replica] = (out[replica] ?? 0) + 1
+      }
+      resolve(out)
+    }
+    req.onerror = () => reject(req.error)
+  })
+}
+
+/**
  * Every cached op for a doc, with its provenance, in canonical (seq, replica)
  * order — the order to replay into a fresh CRDT.
  * @param {string} docId
