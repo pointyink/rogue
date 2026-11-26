@@ -22,6 +22,18 @@ entities round-trip intact.
 | [`@pointyink/tinymce`](plugins/tinymce/) | Drop-in TinyMCE adapter. |
 | [`@pointyink/hugerte`](plugins/hugerte/) | Drop-in HugeRTE adapter. |
 
+## Where the work is
+
+This repo is the engine half of the project. The queue for **both** repos lives in
+one list — [`pointyink/pointy` → `TODO.md`](https://github.com/pointyink/pointy/blob/main/TODO.md),
+tagged `rogue` / `pointy` / `both`. The decision records (including the designs
+behind the open engine work: parked-op indexing, surgical re-fold, offline rebase,
+inline validation) are indexed in
+[`docs/README.md`](https://github.com/pointyink/pointy/blob/main/docs/README.md).
+
+If an item is tagged `both`, the engine ships first (a version tag here), then the
+service bumps its pin.
+
 ## Quick start
 
 ```sh
