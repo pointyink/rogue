@@ -189,23 +189,74 @@ describe('createSyncClient checkpoint', () => {
     expect(FakeWebSocket.instances[1].url).toBe('wss://sync.example.com/ws/doc-1')
   })
 
-  it('keeps the fast path when the counts agree', async () => {
-    vi.mocked(countPerReplica).mockResolvedValueOnce({ 1: 3 })
-    vi.mocked(maxSeqPerReplica).mockResolvedValueOnce({ 1: 3 })
+  it('does not carry an inventory across a connection that died before sync_done', async () => {
+    // Connection 1 learns the server holds five ops for replica 1, then dies
+    // before sync_done — so it never compared anything. Connection 2 has three.
+    // If the inventory survived, it would read as two missing ops and empty
+    // `since` on the following connect for no reason.
+    vi.mocked(maxSeqPerReplica).mockResolvedValue({ 1: 3 })
+    vi.mocked(countPerReplica).mockResolvedValue({ 1: 3 })
+    try {
+      start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
+      await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+      FakeWebSocket.instances[0].emitMessage(
+        frame(DISC_JSON_ENVELOPE, jsonPayload({ type: 'sync_counts', counts: { 1: { n: 5, max: 5 } } })),
+      )
+      FakeWebSocket.instances[0].emitClose()
 
-    start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
-    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
-    const ws = FakeWebSocket.instances[0]
+      await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
+      const ws2 = FakeWebSocket.instances[1]
+      ws2.emitMessage(frame(DISC_JSON_ENVELOPE, jsonPayload({ type: 'sync_done' })))
+      // Let the post-sync check settle (async: cache chain, then a cache read).
+      await new Promise((r) => setTimeout(r, 50))
+      ws2.emitClose()
 
-    ws.emitMessage(frame(DISC_JSON_ENVELOPE, jsonPayload({ type: 'sync_counts', counts: { 1: { n: 3, max: 3 } } })))
-    ws.emitMessage(frame(DISC_JSON_ENVELOPE, jsonPayload({ type: 'sync_done' })))
-    await new Promise((r) => setTimeout(r, 0))
-    ws.emitClose()
+      await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(3), { timeout: 3000 })
+      // No mismatch, so replica 1 stays in `since`. A stale inventory empties it.
+      expect(FakeWebSocket.instances[2].url).toBe(
+        `wss://sync.example.com/ws/doc-1?since=${encodeURIComponent('{"1":3}')}`,
+      )
+    } finally {
+      // clearAllMocks() does not remove implementations, so a default left here
+      // would steer every later test in this file.
+      vi.mocked(maxSeqPerReplica).mockResolvedValue({})
+      vi.mocked(countPerReplica).mockResolvedValue({})
+    }
+  })
 
-    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
-    expect(FakeWebSocket.instances[1].url).toBe(
-      `wss://sync.example.com/ws/doc-1?since=${encodeURIComponent('{"1":3}')}`,
+  it('stops reporting a mismatch once it has given up', async () => {
+    // Past the budget the replica is neither replayed nor re-reported: otherwise
+    // every connect increments the counter and logs again.
+    localStorage.setItem(
+      'rogue.gaps.doc-1',
+      JSON.stringify({ gone: [], attempts: {}, countMisses: { 1: 99 } }),
     )
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.mocked(maxSeqPerReplica).mockResolvedValue({ 1: 3 })
+    vi.mocked(countPerReplica).mockResolvedValue({ 1: 0 })
+    try {
+      start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
+      await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+      FakeWebSocket.instances[0].emitMessage(
+        frame(DISC_JSON_ENVELOPE, jsonPayload({ type: 'sync_counts', counts: { 1: { n: 2, max: 2 } } })),
+      )
+      FakeWebSocket.instances[0].emitMessage(
+        frame(DISC_JSON_ENVELOPE, jsonPayload({ type: 'sync_done' })),
+      )
+      await new Promise((r) => setTimeout(r, 50))
+
+      // Silence, and no replay queued: `since` survives the next connect.
+      expect(err).not.toHaveBeenCalled()
+      FakeWebSocket.instances[0].emitClose()
+      await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 3000 })
+      expect(FakeWebSocket.instances[1].url).toBe(
+        `wss://sync.example.com/ws/doc-1?since=${encodeURIComponent('{"1":3}')}`,
+      )
+    } finally {
+      err.mockRestore()
+      vi.mocked(maxSeqPerReplica).mockResolvedValue({})
+      vi.mocked(countPerReplica).mockResolvedValue({})
+    }
   })
 
   it('sends the max cached seq as since on reconnect', async () => {
