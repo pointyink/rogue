@@ -62,6 +62,7 @@ jobs:
       # before they reach a release.
       - name: Typecheck, format, build smoke
         run: |
+          make versions-check
           make typecheck
           make fmt-check
           make build-dist
