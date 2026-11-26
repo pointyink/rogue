@@ -357,10 +357,13 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
         }
         continue
       }
-      const misses = (countMisses[replica] ?? 0) + 1
-      countMisses[replica] = misses
+      const misses = countMisses[replica] ?? 0
+      // Already given up: say nothing and do nothing. Re-reporting every connect
+      // would grow the counter and the log for ever without changing anything.
+      if (misses > MAX_REPAIR_REPLAYS) continue
+      countMisses[replica] = misses + 1
       changed = true
-      if (misses > MAX_REPAIR_REPLAYS) {
+      if (misses + 1 > MAX_REPAIR_REPLAYS) {
         console.error('[sync-client] ops missing and not repairable by replay', {
           docId,
           replica,
@@ -606,6 +609,9 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
 
   async function connect() {
     if (destroyed) return
+    // A connection that dies before its `sync_counts` must not leave the previous
+    // connection's inventory behind: it would be compared against this one's cache.
+    serverCounts = null
     setStatus('connecting')
     ready = false
     failedThisSync = false
