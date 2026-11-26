@@ -24,6 +24,11 @@ test-serde:
 test-filesync:
 	go test ./filesync/...
 
+# Every internal dependency range must match the workspace version, or npm
+# installs a second copy at a different version and one release ships two engines.
+versions-check:
+	node scripts/check-versions.mjs
+
 typecheck:
 	cd rogue && npx tsc -p jsconfig.json --noEmit
 
