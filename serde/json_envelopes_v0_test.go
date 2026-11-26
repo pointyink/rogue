@@ -21,8 +21,8 @@ func TestEncodeJsonEnvelopesExactBytes(t *testing.T) {
 			return EncodeSyncCounts(map[uint16]OpCount{10: {N: 1, MaxSeq: 5}, 2: {N: 27, MaxSeq: 30873}})
 		}, `{"type":"sync_counts","counts":{"10":{"n":1,"max":5},"2":{"n":27,"max":30873}}}`},
 		{"sync_rejections", func() ([]byte, error) {
-			return EncodeSyncRejections(map[string]string{"2:14": "0.5.1"})
-		}, `{"type":"sync_rejections","rejected":{"2:14":"0.5.1"}}`},
+			return EncodeSyncRejections(map[string][]string{"2:14": {"0.5.1"}})
+		}, `{"type":"sync_rejections","rejected":{"2:14":["0.5.1"]}}`},
 		{"reject_op", func() ([]byte, error) { return EncodeRejectOp("2:14", "0.5.1") }, `{"type":"reject_op","gid":"2:14","version":"0.5.1"}`},
 	}
 	for _, c := range cases {
@@ -46,12 +46,12 @@ func TestJsonEnvelopesRoundTrip(t *testing.T) {
 		t.Fatalf("round trip = %+v", m.Counts)
 	}
 
-	rb, _ := EncodeSyncRejections(map[string]string{"7:42": "9.9.9"})
+	rb, _ := EncodeSyncRejections(map[string][]string{"7:42": {"9.8.0", "9.9.9"}})
 	rm, err := DecodeSyncRejections(rb)
 	if err != nil {
 		t.Fatalf("DecodeSyncRejections: %v", err)
 	}
-	if rm.Rejected["7:42"] != "9.9.9" {
+	if got := rm.Rejected["7:42"]; len(got) != 2 || got[0] != "9.8.0" || got[1] != "9.9.9" {
 		t.Fatalf("round trip = %+v", rm.Rejected)
 	}
 }

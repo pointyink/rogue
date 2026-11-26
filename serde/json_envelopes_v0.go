@@ -62,11 +62,14 @@ type SyncCounts struct {
 }
 
 // SyncRejections carries recorded verdicts: `"<replica>:<seq>"` → the engine
-// version that could not render that op. The op is still in the stream; this only
-// saves the client from discovering it by walking back a broken render.
+// versions that could not render that op. A set, not one version: a verdict is a
+// claim about one engine's renderer, so a client skips the op only if its own
+// version is listed, and a fixed engine is free to reconsider. The op is still in
+// the stream; this only saves the client from discovering it by walking back a
+// broken render.
 type SyncRejections struct {
-	Type     string            `json:"type"`
-	Rejected map[string]string `json:"rejected"`
+	Type     string              `json:"type"`
+	Rejected map[string][]string `json:"rejected"`
 }
 
 // RejectOp is a client's verdict that its engine cannot render one op.
@@ -97,9 +100,9 @@ func EncodeSyncCounts(counts map[uint16]OpCount) ([]byte, error) {
 }
 
 // EncodeSyncRejections returns the payload. Map keys are sorted, as above.
-func EncodeSyncRejections(rejected map[string]string) ([]byte, error) {
+func EncodeSyncRejections(rejected map[string][]string) ([]byte, error) {
 	if rejected == nil {
-		rejected = map[string]string{}
+		rejected = map[string][]string{}
 	}
 	return json.Marshal(SyncRejections{Type: JsonTypeSyncRejections, Rejected: rejected})
 }
@@ -142,7 +145,7 @@ func DecodeSyncCounts(b []byte) (SyncCounts, error) {
 
 // DecodeSyncRejections parses a payload.
 func DecodeSyncRejections(b []byte) (SyncRejections, error) {
-	m := SyncRejections{Rejected: map[string]string{}}
+	m := SyncRejections{Rejected: map[string][]string{}}
 	if err := decodeTyped(b, JsonTypeSyncRejections, &m); err != nil {
 		return SyncRejections{}, err
 	}

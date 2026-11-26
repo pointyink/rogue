@@ -41,7 +41,7 @@ they do not know.
 | `sync_start` | s→c | `bytes` | Total size of the incoming op stream; pre-grow storage, show progress. |
 | `sync_done` | s→c | — | End of stream; the client may replay its own unacked queue. |
 | `sync_counts` | s→c | `counts: {"<replica>": {"n", "max"}}` | What the server holds per replica. A larger `n` than the client's cache is an op it never received; a larger `max` is a missing tail. |
-| `sync_rejections` | s→c | `rejected: {"<replica>:<seq>": "<engine version>"}` | Recorded verdicts: the op cannot be rendered by that engine. The op is still in the stream — the client skips it instead of walking back. |
+| `sync_rejections` | s→c | `rejected: {"<replica>:<seq>": ["<engine version>", …]}` | Recorded verdicts: the op cannot be rendered by those engines. A set, because a verdict is per engine — a client skips only if its own version is listed, and a fixed engine reconsiders. The op is still in the stream. |
 | `reject_op` | c→s | `gid`, `version` | A client's verdict about one op. Writer-only; recorded, never enforced. |
 
 ## Mapping notes
