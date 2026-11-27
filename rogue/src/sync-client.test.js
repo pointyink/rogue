@@ -63,6 +63,9 @@ class FakeWebSocket {
   /** @type {Uint8Array[]} */
   sent = []
 
+  /** 0 = connecting, 1 = open, 3 = closed; the client gates sends on 1. */
+  readyState = 0
+
   /** @param {any} data */
   send(data) {
     if (data instanceof Uint8Array) this.sent.push(data)
@@ -272,8 +275,18 @@ describe('createSyncClient checkpoint', () => {
       return view.getUint16(0, true) === DISC_JSON_ENVELOPE
     })
     expect(frame).toBeTruthy()
-    const body = new TextDecoder().decode(frame.slice(6))
+    const body = new TextDecoder().decode(/** @type {Uint8Array} */ (frame).slice(6))
     expect(JSON.parse(body)).toEqual({ type: 'reject_op', gid: '7:42', version: '0.4.3' })
+  })
+
+  it('does not try to report a rejection while the socket is down', async () => {
+    const client = start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const ws = FakeWebSocket.instances[0]
+    ws.readyState = 3 // closed
+
+    client.reject('7:42')
+    expect(ws.sent).toHaveLength(0)
   })
 
   it('applies only verdicts from its own engine version', async () => {

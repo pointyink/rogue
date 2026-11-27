@@ -390,6 +390,18 @@ export async function createEditorSession({
             console.error('[editor-session] verdict not remembered:', err),
           )
         }
+        // Verdicts this device holds that the server has not recorded. A
+        // rejection made offline is never re-validated — a re-delivered op
+        // short-circuits on the skip set before validation — so this is the
+        // only chance to report it.
+        const known = new Set(gids)
+        rejectedGids(docId)
+          .then((local) => {
+            for (const gid of local) {
+              if (!known.has(gid)) syncClient?.reject?.(gid)
+            }
+          })
+          .catch(() => {})
       },
     })
 

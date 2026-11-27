@@ -114,4 +114,4 @@ export function addRejectedGid(docId: string, gid: string, at?: {
  * @param {string} docId
  */
 export function clearDoc(docId: string): Promise<void>;
-export const REJECT_VERSION: "0.4.3";
+export const REJECT_VERSION: "0.6.1";
