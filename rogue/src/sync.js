@@ -216,6 +216,7 @@ export function nodeSpan(rope, node) {
  *   redo: () => void,
  *   beginLoad: () => void,
  *   endLoad: () => void,
+ *   skipRejected: (gids: string[]) => number,
  *   drainParked: () => void,
  *   setSyncDebug: (on: boolean) => void,
  *   setAuthor: (author: number) => void,
@@ -2039,7 +2040,13 @@ export async function createRogueNode({
 
     const gid = gidOf(payload);
     const key = gidKey(gid);
-    if (rejected.has(key)) return 'rejected';
+    if (rejected.has(key)) {
+      // Keep the bytes. A verdict is a hint, not a deletion: if this document
+      // does not validate without the op, `endLoad` merges it back — which it
+      // can only do if the payload is here.
+      if (!skipped.has(key)) skipped.set(key, payload);
+      return 'rejected';
+    }
     if (appliedKeys.has(key)) return 'applied';
 
     // The op's affected region, as an escalation of levels from tightest up to
@@ -2324,6 +2331,22 @@ export async function createRogueNode({
         return 'deferred';
       }
       return applyOp(payload);
+    },
+
+    /** Add verdicts recorded by the server (or by another client) to the skip
+     *  set. They arrive before the op stream, so the ops they name are skipped
+     *  as they are merged; `endLoad` still validates the result and merges back
+     *  if the set is incoherent. Returns how many were new.
+     *  @param {Array<string>} gids */
+    skipRejected(gids) {
+      let added = 0;
+      for (const gid of gids ?? []) {
+        const key = String(gid);
+        if (rejected.has(key)) continue;
+        rejected.add(key);
+        added++;
+      }
+      return added;
     },
 
     /** Enter bootstrap mode: subsequent mergeOp calls merge into the CRDT but

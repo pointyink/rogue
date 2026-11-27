@@ -212,6 +212,9 @@ export async function createEditorSession({
         addRejectedGid(docId, gid).catch((err) =>
           console.error('[editor-session] rejected op not remembered:', err),
         )
+        // Tell the server, so every other client skips it instead of walking
+        // back a broken render. Advisory and idempotent.
+        syncClient?.reject?.(gid)
       }
     },
     sizeWarn,
@@ -376,6 +379,18 @@ export async function createEditorSession({
       onCommentChanged: () => comments?.handleRemoteChange(),
       onSuggestionChanged: () => suggestions?.handleRemoteChange(),
       onDocDeleted,
+      // Verdicts the server has already recorded, delivered before the op
+      // stream: skip them here (the ops arrive below), keep them locally so the
+      // next load starts from the same set, and let endLoad validate once.
+      onRejections: (gids) => {
+        node.skipRejected(gids)
+        if (!docId) return
+        for (const gid of gids) {
+          addRejectedGid(docId, gid).catch((err) =>
+            console.error('[editor-session] verdict not remembered:', err),
+          )
+        }
+      },
     })
 
     // Relay local ops to sibling tabs over a BroadcastChannel so they converge

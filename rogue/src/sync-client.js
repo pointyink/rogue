@@ -23,6 +23,7 @@ import {
   maxSeqPerReplica,
   countPerReplica,
   markAcked,
+  REJECT_VERSION,
   clearDoc as clearCacheDoc,
 } from './doc-cache.js'
 import { appendSince } from './checkpoint.js'
@@ -108,11 +109,13 @@ function frameVariable(disc, payload) {
  *   onCommentChanged?: (info: { comment_id: string, op: string }) => void,
  *   onSuggestionChanged?: (info: { suggestion_id: string, op: string }) => void,
  *   onDocDeleted?: (docId: string) => void,
+ *   onRejections?: (gids: string[]) => void,
  *   persist?: boolean,
  * }} SyncClientOptions
  *
  * @typedef {{
  *   send: (payload: Uint8Array) => void,
+ *   reject: (gid: string) => void,
  *   sendDelete: () => void,
  *   destroy: () => void,
  *   isReady: () => boolean,
@@ -128,7 +131,7 @@ const WS_PROTOCOL = 'rogue.jwt'
  * @param {SyncClientOptions} options
  * @returns {SyncClient}
  */
-export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, onReady, onSyncStart, onProgress, onCommentChanged, onSuggestionChanged, onDocDeleted, persist = true }) {
+export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, onReady, onSyncStart, onProgress, onCommentChanged, onSuggestionChanged, onDocDeleted, onRejections, persist = true }) {
   /** @type {WebSocket | null} */
   let ws = null
   let retryDelay = 1000
@@ -545,6 +548,17 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
           serverCounts = counts
           return
         }
+        if (msg?.type === 'sync_rejections') {
+          // Verdicts recorded by the server, delivered before the op stream.
+          // Only the ones naming this engine's validator apply: a verdict is a
+          // claim about the engine that made it, so a fixed one reconsiders.
+          const gids = []
+          for (const [gid, versions] of Object.entries(msg.rejected ?? {})) {
+            if (Array.isArray(versions) && versions.includes(REJECT_VERSION)) gids.push(gid)
+          }
+          if (gids.length > 0) onRejections?.(gids)
+          return
+        }
         if (msg?.type === 'sync_done') {
           if (!ready) {
             // A replay that merged everything has healed whatever was missing.
@@ -697,6 +711,21 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
   /** Ask the server to delete this doc (sync-native `delete_doc` message). The
    *  server authorizes the owner, tombstones the doc, and broadcasts the
    *  deletion to every connected client. No-op when the socket is down. */
+  /**
+   * Tell the server this engine cannot render an op. Advisory: the op stays in
+   * the stream and every other client may disagree. Offline it is a no-op — the
+   * local verdict still skips the op on this device, and the report happens
+   * again the next time the engine meets it online.
+   * @param {string} gid
+   */
+  function reject(gid) {
+    if (!gid || !ws || ws.readyState !== 1) return
+    const payload = new TextEncoder().encode(
+      JSON.stringify({ type: 'reject_op', gid: String(gid), version: REJECT_VERSION }),
+    )
+    ws.send(/** @type {BufferSource} */ (frameVariable(DISC_JSON_ENVELOPE, payload)))
+  }
+
   function sendDelete() {
     const payload = new TextEncoder().encode('{"type":"delete_doc"}')
     ws?.send(/** @type {BufferSource} */ (frameVariable(DISC_JSON_ENVELOPE, payload)))
@@ -807,6 +836,7 @@ export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, on
   bootstrap()
   return {
     send,
+    reject,
     sendDelete,
     destroy,
     isReady: () => ready,

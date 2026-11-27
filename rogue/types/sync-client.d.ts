@@ -2,7 +2,7 @@
  * @param {SyncClientOptions} options
  * @returns {SyncClient}
  */
-export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, onReady, onSyncStart, onProgress, onCommentChanged, onSuggestionChanged, onDocDeleted, persist }: SyncClientOptions): SyncClient;
+export function createSyncClient({ wsUrl, docId, mergeOp, getToken, onStatus, onReady, onSyncStart, onProgress, onCommentChanged, onSuggestionChanged, onDocDeleted, onRejections, persist }: SyncClientOptions): SyncClient;
 export type ApplyOutcome = "applied" | "parked" | "rejected" | "deferred";
 /**
  * `persist` defaults to true: every merged op is appended to the IndexedDB doc
@@ -29,10 +29,12 @@ export type SyncClientOptions = {
         op: string;
     }) => void;
     onDocDeleted?: (docId: string) => void;
+    onRejections?: (gids: string[]) => void;
     persist?: boolean;
 };
 export type SyncClient = {
     send: (payload: Uint8Array) => void;
+    reject: (gid: string) => void;
     sendDelete: () => void;
     destroy: () => void;
     isReady: () => boolean;
