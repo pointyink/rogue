@@ -24,6 +24,26 @@ if (!version || !/^\d+\.\d+\.\d+$/.test(version)) {
 const PACKAGES = ['serde', 'rogue', 'plugins/tinymce', 'plugins/hugerte']
 const names = new Map()
 
+// Pre-flight: everything below writes to the tree, and a half-failed run leaves
+// manifests bumped but the lockfile and declarations stale — the exact drift this
+// script exists to prevent.
+const dirty = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim()
+if (dirty) {
+  console.error(`working tree is not clean:\n${dirty}`)
+  process.exit(1)
+}
+const current = JSON.parse(readFileSync('rogue/package.json', 'utf8')).version
+const cmp = (a, b) => {
+  const pa = a.split('.').map(Number)
+  const pb = b.split('.').map(Number)
+  for (let i = 0; i < 3; i++) if (pa[i] !== pb[i]) return pa[i] - pb[i]
+  return 0
+}
+if (cmp(version, current) <= 0) {
+  console.error(`${version} is not greater than the current ${current} — nothing to release`)
+  process.exit(1)
+}
+
 // 1. Each package's own version.
 for (const dir of PACKAGES) {
   const file = `${dir}/package.json`

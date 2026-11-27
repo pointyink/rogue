@@ -118,7 +118,7 @@ Run the release from a clean tree, with the version you intend to tag:
 make release-prepare V=0.7.1
 git commit -am "chore(release): 0.7.1" && git push   # release PR
 # merge it, then:
-git tag -a v0.7.1 && git push origin v0.7.1
+git tag -a v0.7.1 -m v0.7.1 && git push origin v0.7.1
 make release-await V=0.7.1      # every package, not just the dist-tag
 ```
 
@@ -130,7 +130,7 @@ looks**, and every drift we have had came from writing one of them by hand.
 | the four `package.json` `version` fields | must all agree |
 | each package's `@pointyink/*` range | `^<version>` — this is the one that regressed: the plugins kept `^0.4.0` and npm installed a nested copy, so the demos bundled a different engine from the app |
 | `REJECT_VERSION` (`rogue/src/doc-cache.js`) | gates rejection verdicts; a release reconsiders them once |
-| `package-lock.json` | derived |
+| `package-lock.json` | derived (it records the two workspaces — `serde`, `rogue`; the plugins are published, not workspaces) |
 | `types/` | derived, and `REJECT_VERSION` is a `const` so its literal lands here |
 
 `make versions-check` (run in CI) asserts the first three agree, so a release
