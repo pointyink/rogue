@@ -112,7 +112,34 @@ wrong, explain why rather than silently loosening it.
 
 ## Release
 
-Bump `version` in all four `package.json` files (`serde`, `rogue`,
-`plugins/tinymce`, `plugins/hugerte`) to the same value, then tag `v<version>`.
-CI enforces the match and publishes via npm Trusted Publishing. `dist/` is
+Run the release from a clean tree, with the version you intend to tag:
+
+```sh
+make release-prepare V=0.7.1
+git commit -am "chore(release): 0.7.1" && git push   # release PR
+# merge it, then:
+git tag -a v0.7.1 && git push origin v0.7.1
+make release-await V=0.7.1      # every package, not just the dist-tag
+```
+
+`release-prepare` is the whole point: a version lives in **more places than it
+looks**, and every drift we have had came from writing one of them by hand.
+
+| where | what |
+|---|---|
+| the four `package.json` `version` fields | must all agree |
+| each package's `@pointyink/*` range | `^<version>` — this is the one that regressed: the plugins kept `^0.4.0` and npm installed a nested copy, so the demos bundled a different engine from the app |
+| `REJECT_VERSION` (`rogue/src/doc-cache.js`) | gates rejection verdicts; a release reconsiders them once |
+| `package-lock.json` | derived |
+| `types/` | derived, and `REJECT_VERSION` is a `const` so its literal lands here |
+
+`make versions-check` (run in CI) asserts the first three agree, so a release
+that skips the script fails rather than shipping two engines.
+
+`release-await` covers the other recurring surprise: npm's *dist-tag* can read
+`latest` while a package's own manifest still 404s (serde has trailed by minutes),
+and a consumer bumping in that window fails `npm ci` with `ETARGET` — which looks
+like a dependency bug and is not. Wait for the manifests, then bump the consumer.
+
+CI enforces the tag match and publishes via npm Trusted Publishing. `dist/` is
 built at publish time; do not commit it.
