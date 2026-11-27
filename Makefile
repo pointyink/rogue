@@ -26,6 +26,17 @@ test-filesync:
 
 # Every internal dependency range must match the workspace version, or npm
 # installs a second copy at a different version and one release ships two engines.
+# Write every place the version lives: the four manifests, the internal ranges,
+# REJECT_VERSION, the lockfile and the declarations. `versions-check` proves it.
+release-prepare:
+	@test -n "$(V)" || (echo "usage: make release-prepare V=0.7.1" && exit 1)
+	@node scripts/release-prepare.mjs $(V)
+
+# The registry lag, per package. Publish succeeding is a claim; this is the proof.
+release-await:
+	@test -n "$(V)" || (echo "usage: make release-await V=0.7.1" && exit 1)
+	@node scripts/await-publish.mjs $(V)
+
 versions-check:
 	node scripts/check-versions.mjs
 
