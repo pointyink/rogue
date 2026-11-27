@@ -960,6 +960,45 @@ describe('createRogueNode', () => {
       ])
     })
 
+    it('skips an op the server reported, and still renders the rest', async () => {
+      // The verdict arrives before the stream, so the op is skipped as it is
+      // merged — no walk-back, which is the whole point of recording it.
+      const payloads = makeLog(['<p>1</p>', '<p>2</p>', '<p>3</p>'])
+      const bad = payloads[1]
+      const v = new DataView(bad.buffer, bad.byteOffset, bad.byteLength)
+      const gid = `${v.getUint16(0, true)}:${v.getUint32(2, true)}`
+
+      const el = makeEditor()
+      const node = await createRogueNode({ element: el, replicaId: 1 })
+      node.beginLoad()
+      expect(node.skipRejected([gid])).toBe(1)
+      expect(node.skipRejected([gid])).toBe(0) // idempotent
+      for (const p of payloads) node.mergeOp(p)
+      node.endLoad()
+
+      expect(el.innerHTML).toBe('<p>1</p><p>3</p>')
+      expect(node.exportOps()).toHaveLength(2)
+      expect(validHtml(el.innerHTML)).toBe(true)
+    })
+
+    it('merges a server verdict back when the document does not validate without it', async () => {
+      // An opener skipped by verdict leaves its closer invalid. The payload was
+      // kept when the op was skipped, so the fallback can undo the skip — a
+      // verdict costs time, never the document.
+      const A = rootInsert(2, 1, bytes('<p>a'))
+      const B = rootInsert(2, 5, bytes('</p>'))
+      const el = makeEditor()
+      const node = await createRogueNode({ element: el, replicaId: 1 })
+      node.beginLoad()
+      node.skipRejected(['2:1'])
+      node.mergeOp(A)
+      node.mergeOp(B)
+      node.endLoad()
+
+      expect(el.innerHTML).toBe('<p>a</p>')
+      expect(validHtml(el.innerHTML)).toBe(true)
+    })
+
     it('undoes a skip set that does not validate instead of emptying the doc', async () => {
       // Skipping an op that other ops depend on parks them all. The skip set is a
       // hypothesis: when it fails to validate, the engine merges the skipped ops

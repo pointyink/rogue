@@ -160,6 +160,7 @@ export function nodeSpan(rope: NonNullable<ReturnType<typeof buildRope>>, node: 
  *   redo: () => void,
  *   beginLoad: () => void,
  *   endLoad: () => void,
+ *   skipRejected: (gids: string[]) => number,
  *   drainParked: () => void,
  *   setSyncDebug: (on: boolean) => void,
  *   setAuthor: (author: number) => void,
@@ -391,6 +392,7 @@ export type RogueNode = {
     redo: () => void;
     beginLoad: () => void;
     endLoad: () => void;
+    skipRejected: (gids: string[]) => number;
     drainParked: () => void;
     setSyncDebug: (on: boolean) => void;
     setAuthor: (author: number) => void;

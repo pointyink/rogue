@@ -45,7 +45,7 @@ const REJECTED = 'rejected'
 // a new engine must be allowed to look again — a stricter-then-fixed validator
 // should not keep an op hidden for ever. Stored with each row and compared on
 // read; stale rows are simply ignored.
-const REJECT_VERSION = '0.4.3'
+export const REJECT_VERSION = '0.6.1'
 
 /** @type {Promise<IDBDatabase> | null} */
 let dbPromise = null

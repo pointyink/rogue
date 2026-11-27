@@ -19,6 +19,27 @@ for (const dir of packages) {
 }
 
 let problems = 0
+// A rejection is a claim about this engine's renderer. It is gated on this
+// version, and the gate is only meaningful if the version moves: an op rejected
+// by a validator bug stays hidden from every later engine otherwise, and nothing
+// detects it (the document validates *without* the op, so the walk-back fallback
+// never fires). Tying it to the release means each release reconsiders them once.
+const rejectVersion = (() => {
+  try {
+    const src = readFileSync('rogue/src/doc-cache.js', 'utf8')
+    const m = src.match(/REJECT_VERSION\s*=\s*'([^']+)'/)
+    return m ? m[1] : null
+  } catch {
+    return null
+  }
+})()
+const rogueVersion = versions.get('rogue')
+if (rejectVersion !== rogueVersion) {
+  console.error(
+    `rogue/src/doc-cache.js: REJECT_VERSION is ${rejectVersion}, want ${rogueVersion} (the release version)`,
+  )
+  problems++
+}
 const distinct = new Set(versions.values())
 if (distinct.size !== 1) {
   console.error(`workspace versions differ: ${[...distinct].join(', ')}`)

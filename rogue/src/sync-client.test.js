@@ -27,6 +27,7 @@ vi.mock('./doc-cache.js', () => ({
   cachedRows: vi.fn(() => Promise.resolve([])),
   maxSeqPerReplica: vi.fn(() => Promise.resolve({})),
   countPerReplica: vi.fn(() => Promise.resolve({})),
+  REJECT_VERSION: '0.4.3',
   clearDoc: vi.fn(() => Promise.resolve()),
 }))
 
@@ -61,6 +62,9 @@ class FakeWebSocket {
 
   /** @type {Uint8Array[]} */
   sent = []
+
+  /** 0 = connecting, 1 = open, 3 = closed; the client gates sends on 1. */
+  readyState = 0
 
   /** @param {any} data */
   send(data) {
@@ -257,6 +261,51 @@ describe('createSyncClient checkpoint', () => {
       vi.mocked(maxSeqPerReplica).mockResolvedValue({})
       vi.mocked(countPerReplica).mockResolvedValue({})
     }
+  })
+
+  it('reports a rejected op to the server', async () => {
+    const client = start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const ws = FakeWebSocket.instances[0]
+    ws.readyState = 1
+
+    client.reject('7:42')
+    const frame = ws.sent.find((f) => {
+      const view = new DataView(f.buffer, f.byteOffset, f.byteLength)
+      return view.getUint16(0, true) === DISC_JSON_ENVELOPE
+    })
+    expect(frame).toBeTruthy()
+    const body = new TextDecoder().decode(/** @type {Uint8Array} */ (frame).slice(6))
+    expect(JSON.parse(body)).toEqual({ type: 'reject_op', gid: '7:42', version: '0.4.3' })
+  })
+
+  it('does not try to report a rejection while the socket is down', async () => {
+    const client = start('wss://sync.example.com/ws/doc-1', 'doc-1', () => {})
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const ws = FakeWebSocket.instances[0]
+    ws.readyState = 3 // closed
+
+    client.reject('7:42')
+    expect(ws.sent).toHaveLength(0)
+  })
+
+  it('applies only verdicts from its own engine version', async () => {
+    const seen = vi.fn()
+    createSyncClient({
+      wsUrl: 'wss://sync.example.com/ws/doc-1',
+      docId: 'doc-1',
+      mergeOp: () => 'applied',
+      getToken: () => Promise.resolve('token-1'),
+      onRejections: seen,
+    })
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const ws = FakeWebSocket.instances[0]
+
+    ws.emitMessage(frame(DISC_JSON_ENVELOPE, jsonPayload({
+      type: 'sync_rejections',
+      rejected: { '1:10': ['0.4.3'], '2:20': ['9.9.9'] },
+    })))
+    expect(seen).toHaveBeenCalledWith(['1:10'])
   })
 
   it('sends the max cached seq as since on reconnect', async () => {
